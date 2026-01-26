@@ -204,6 +204,8 @@ Update the `agentic/.env` file with the following values:
 | `GATEWAY_URL` | API Gateway HTTP URL (from Step 3, without trailing slash) |
 | `AWS_REGION` | `us-east-1` |
 
+> **Note:**  When configuring the Coinbase Developer Platform API Key, enable View, Trade, Transfer, and Export & Manage for Server Wallet.
+
 ### Quick Start
 
 For complete automated setup:
