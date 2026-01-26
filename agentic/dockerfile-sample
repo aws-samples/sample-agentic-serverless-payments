@@ -1,0 +1,31 @@
+FROM --platform=linux/arm64 python:3.11-slim
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    make \
+    gcc \
+    libsodium-dev \
+    libsodium23 \
+    pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV SODIUM_INSTALL=system
+ENV PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt && \
+    pip uninstall -y bcl && \
+    pip install --no-cache-dir bcl==3.0.0
+
+COPY agent.py .
+COPY tools.py .
+COPY wallet.py .
+COPY web3_provider.py .
+COPY cost_estimator.py .
+COPY memory_hook.py .
+
+EXPOSE 8080
+
+CMD ["python", "agent.py"]

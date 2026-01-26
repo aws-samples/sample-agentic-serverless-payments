@@ -1,0 +1,44 @@
+{
+  "name": "ai-content-monetization",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
+    "preview": "vite preview",
+    "setup": "./test/integration/setup.sh",
+    "setup-serverless": "./test/integration/setup_serverless.sh",
+    "setup-agentic": "./test/integration/setup_agentic.sh",
+    "setup-amplify": "./test/integration/setup_amplify.sh",
+    "cleanup": "./test/integration/cleanup.sh"
+  },
+  "dependencies": {
+    "@reown/appkit": "^1.8.6",
+    "@reown/appkit-adapter-wagmi": "^1.8.6",
+    "@tanstack/react-query": "^5.0.0",
+    "buffer": "^6.0.3",
+    "crypto-browserify": "^3.3.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "stream-browserify": "^3.0.0",
+    "util": "^0.12.5",
+    "viem": "^2.38.3",
+    "wagmi": "^2.12.0"
+  },
+  "devDependencies": {
+    "@aws-amplify/backend": "^1.0.0",
+    "@aws-amplify/backend-cli": "^1.0.0",
+    "@types/react": "^18.2.0",
+    "@types/react-dom": "^18.2.0",
+    "@typescript-eslint/eslint-plugin": "^6.0.0",
+    "@typescript-eslint/parser": "^6.0.0",
+    "@vitejs/plugin-react": "^4.0.0",
+    "eslint": "^8.45.0",
+    "eslint-plugin-react-hooks": "^4.6.0",
+    "eslint-plugin-react-refresh": "^0.4.3",
+    "typescript": "^5.0.2",
+    "vite": "^7.1.9"
+  }
+}

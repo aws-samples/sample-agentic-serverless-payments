@@ -1,0 +1,41 @@
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: #ffffff; /* AWS white background */
+  font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
+  min-height: 100vh;
+  color: #1F2937; /* Gray-800 for readability */
+}
+
+#root { min-height: 100vh; }
+
+button {
+  border-radius: 10px;
+  border: 1px solid #D5DBDB;
+  padding: 0.6em 1.2em;
+  font-size: 1em;
+  font-weight: 600;
+  font-family: inherit;
+  background-color: #232F3E; /* AWS dark blue */
+  color: #ffffff;
+  cursor: pointer;
+  transition: border-color 0.2s, box-shadow 0.2s, transform 0.06s ease;
+}
+button:hover {
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.18);
+  transform: translateY(-1px);
+}
+button:focus,
+button:focus-visible {
+  outline: none;
+  border-color: #232F3E;
+  box-shadow: 0 0 0 3px rgba(35, 47, 62, 0.15);
+}
+
+a {
+  font-weight: 700;
+  text-decoration: none;
+  color: #0073bb; /* AWS link blue */
+}
+a:hover { color: #005b96; }

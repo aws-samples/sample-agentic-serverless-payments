@@ -1,0 +1,11 @@
+strands-agents
+fastapi
+uvicorn[standard]
+pydantic
+coinbase-agentkit==0.7.4
+requests
+python-dotenv
+web3>=6.0.0
+x402>=0.1.0
+httpx
+bedrock-agentcore

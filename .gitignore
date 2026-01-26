@@ -1,0 +1,18 @@
+.env
+node_modules/
+dist/
+cdk.out/
+*.log
+.DS_Store
+amplify_outputs.json
+
+# CDK build output
+cdk/lib/*.js
+cdk/lib/*.d.ts
+cdk/bin/*.js
+cdk/bin/*.d.ts
+serverless/lib/*.js
+serverless/lib/*.d.ts
+serverless/bin/*.js
+serverless/bin/*.d.ts
+.DS_Store

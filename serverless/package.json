@@ -1,0 +1,29 @@
+{
+  "name": "ai-content-monetization-cdk",
+  "version": "1.0.0",
+  "scripts": {
+    "build": "tsc",
+    "deploy": "cdk deploy && ./export-env.sh",
+    "synth": "cdk synth"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "aws-cdk": "^2.100.0",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "@aws-sdk/client-bedrock-runtime": "^3.400.0",
+    "@aws-sdk/client-bedrock-agentcore": "^3.937.0",
+    "@aws-sdk/client-dynamodb": "^3.400.0",
+    "@aws-sdk/client-lambda": "^3.400.0",
+    "@aws-sdk/client-s3": "^3.400.0",
+    "@aws-sdk/client-apigatewaymanagementapi": "^3.400.0",
+    "@aws-sdk/lib-dynamodb": "^3.400.0",
+    "@aws-sdk/s3-request-presigner": "^3.400.0",
+    "aws-cdk-lib": "^2.100.0",
+    "cdk-nag": "^2.37.55",
+    "constructs": "^10.0.0",
+    "hono": "^4.11.4"
+  }
+}

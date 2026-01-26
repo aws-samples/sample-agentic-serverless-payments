@@ -1,0 +1,18 @@
+{
+  "name": "x402-gateway-cdk",
+  "version": "1.0.0",
+  "scripts": {
+    "deploy": "cdk deploy --require-approval never",
+    "destroy": "cdk destroy"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0"
+  },
+  "dependencies": {
+    "aws-cdk-lib": "^2.100.0",
+    "constructs": "^10.0.0",
+    "cdk-nag": "^2.28.0",
+    "dotenv": "^16.4.5",
+    "hono": "^4.0.0"
+  }
+}

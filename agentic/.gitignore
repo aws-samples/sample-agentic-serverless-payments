@@ -1,0 +1,16 @@
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.env
+.DS_Store
+cdk/node_modules/
+cdk/cdk.out/
+lambda/node_modules/
