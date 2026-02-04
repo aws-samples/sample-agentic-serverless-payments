@@ -12,7 +12,7 @@ const X402_CONFIG = {
   scheme: 'exact'
 };
 
-// Idempotency cache
+// Idempotency cache - for production, persist to DynamoDB for multi-instance scalability
 const processedPayments = new Map();
 
 // CORS middleware

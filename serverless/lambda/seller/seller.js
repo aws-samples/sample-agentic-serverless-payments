@@ -16,7 +16,7 @@ const X402_CONFIG = {
   scheme: 'exact'
 };
 
-// Idempotency cache - track transaction hashes
+// Idempotency cache - for production, persist to DynamoDB for multi-instance scalability
 const processedPayments = new Map();
 
 // Add CORS middleware

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Agentic Architecture Setup Script
-# Follows README manual steps 5.1-5.9 exactly
+# Uses CDK for reliable AgentCore Runtime deployment (replaces toolkit)
 
 set -Eeuo pipefail
 trap 'echo -e "\033[0;31m[ERROR]\033[0m Command failed: ${BASH_COMMAND} (exit $?) at line $LINENO"' ERR
@@ -20,7 +20,8 @@ check_prerequisites() {
     print_status "Checking prerequisites..."
     local missing=()
     
-    command -v python3.11 &>/dev/null || missing+=("python3.11")
+    command -v node &>/dev/null || missing+=("node")
+    command -v npm &>/dev/null || missing+=("npm")
     command -v aws &>/dev/null || missing+=("aws-cli")
     command -v cdk &>/dev/null || missing+=("aws-cdk")
     
@@ -54,221 +55,71 @@ validate_env() {
     print_success "Environment validated"
 }
 
-cleanup_previous_state() {
-    print_status "Cleaning up previous AgentCore state..."
-    cd "$PROJECT_ROOT/agentic"
-    
-    rm -rf .bedrock_agentcore .bedrock_agentcore.yaml venv 2>/dev/null || true
-    
-    print_success "Previous state cleaned"
-}
-
-# Step 5.1
-deploy_gateway() {
-    print_status "Step 5.1: Deploying x402 Payment Gateway..."
+deploy_cdk_stack() {
+    print_status "Deploying CDK stack (Gateway + AgentCore Runtime + Memory)..."
     cd "$PROJECT_ROOT/agentic/cdk"
+    
+    # Export env vars for CDK
+    set -a && source "$PROJECT_ROOT/agentic/.env" && set +a
     
     npm install
     cdk bootstrap
+    
+    print_status "Deploying stack (this may take 10-15 minutes for container build)..."
     cdk deploy --require-approval never
     
-    print_success "Gateway deployed"
+    print_success "CDK stack deployed"
 }
 
-# Step 5.2
-export_gateway_url() {
-    print_status "Step 5.2: Exporting Gateway URL..."
+# Export outputs to .env files
+export_outputs() {
+    print_status "Exporting CDK outputs to .env files..."
     cd "$PROJECT_ROOT/agentic"
     
     chmod +x agentic-export.sh
     ./agentic-export.sh
     
-    print_success "Gateway URL exported"
+    print_success "Outputs exported"
 }
 
-# Step 5.3
-setup_python_env() {
-    print_status "Step 5.3: Setting up Python environment..."
-    cd "$PROJECT_ROOT/agentic"
-    
-    python3.11 -m venv venv
-    source venv/bin/activate
-    pip install --upgrade pip
-    pip install bedrock-agentcore strands-agents bedrock-agentcore-starter-toolkit
-    
-    print_success "Python environment ready"
-}
-
-# Step 5.4
-create_runtime_role() {
-    print_status "Step 5.4: Creating Runtime Role..."
-    
-    ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-    UNIQUE_ID=$(openssl rand -hex 4)
-    
-    aws iam create-role \
-        --role-name "AmazonBedrockAgentCoreSDKRuntime-us-east-1-${UNIQUE_ID}" \
-        --assume-role-policy-document '{
-            "Version": "2012-10-17",
-            "Statement": [{
-                "Effect": "Allow",
-                "Principal": {"Service": "bedrock-agentcore.amazonaws.com"},
-                "Action": "sts:AssumeRole"
-            }]
-        }'
-    
-    echo "UNIQUE_ID: ${UNIQUE_ID}"
-    export ACCOUNT_ID UNIQUE_ID
-    
-    print_success "Runtime role created"
-}
-
-# Step 5.5
-add_runtime_role_permissions() {
-    print_status "Step 5.5: Adding Runtime Role Permissions..."
-    
-    aws iam put-role-policy \
-        --role-name "AmazonBedrockAgentCoreSDKRuntime-us-east-1-${UNIQUE_ID}" \
-        --policy-name ECRAccess \
-        --policy-document '{
-            "Version": "2012-10-17",
-            "Statement": [{
-                "Effect": "Allow",
-                "Action": ["ecr:GetAuthorizationToken"],
-                "Resource": "*"
-            },
-            {
-                "Effect": "Allow",
-                "Action": ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"],
-                "Resource": "arn:aws:ecr:us-east-1:*:repository/bedrock-agentcore-*"
-            }]
-        }'
-    
-    print_success "Runtime role permissions added"
-}
-
-# Step 5.6
-configure_agentcore() {
-    print_status "Step 5.6: Configuring AgentCore..."
-    cd "$PROJECT_ROOT/agentic"
-    source venv/bin/activate
-    
-    agentcore configure \
-        --entrypoint agent.py \
-        --deployment-type container \
-        --ecr auto \
-        --execution-role "arn:aws:iam::${ACCOUNT_ID}:role/AmazonBedrockAgentCoreSDKRuntime-us-east-1-${UNIQUE_ID}" \
-        --region us-east-1 \
-        --non-interactive
-    
-    print_success "AgentCore configured"
-}
-
-# Step 5.7
-deploy_agent() {
-    print_status "Step 5.7: Deploying agent..."
-    cd "$PROJECT_ROOT/agentic"
-    source venv/bin/activate
-    
-    cp dockerfile-sample .bedrock_agentcore/agent/Dockerfile
-    export $(grep -v '^#' .env | xargs)
-    
-    # Try up to 3 times (CodeBuild can be flaky)
-    for attempt in 1 2 3; do
-        print_status "Deployment attempt $attempt..."
-        if agentcore deploy \
-            --env CDP_API_KEY_ID="$CDP_API_KEY_ID" \
-            --env CDP_API_KEY_SECRET="$CDP_API_KEY_SECRET" \
-            --env CDP_WALLET_SECRET="$CDP_WALLET_SECRET" \
-            --env NETWORK_ID="$NETWORK_ID" \
-            --env RPC_URL="$RPC_URL" \
-            --env USDC_CONTRACT="$USDC_CONTRACT" \
-            --env SELLER_WALLET="$SELLER_WALLET" \
-            --env GATEWAY_URL="$GATEWAY_URL" \
-            --env AWS_REGION="$AWS_REGION"; then
-            print_success "Agent deployed"
-            return 0
-        fi
-        
-        if [ $attempt -lt 3 ]; then
-            print_status "Retrying in 5 seconds..."
-            sleep 5
-        fi
-    done
-    
-    print_error "Agent deployment failed after 3 attempts"
-    exit 1
-}
-
-# Step 5.8
-add_iam_permissions() {
-    print_status "Step 5.8: Adding IAM permissions..."
-    cd "$PROJECT_ROOT/agentic"
-    
-    ROLE_NAME=$(grep 'execution_role:' .bedrock_agentcore.yaml | head -1 | sed 's/.*role\///')
-    
-    aws iam attach-role-policy \
-        --role-name "$ROLE_NAME" \
-        --policy-arn arn:aws:iam::aws:policy/AmazonBedrockFullAccess
-    
-    aws iam put-role-policy \
-        --role-name "$ROLE_NAME" \
-        --policy-name AgentCoreMemoryAccess \
-        --policy-document '{
-            "Version": "2012-10-17",
-            "Statement": [{
-                "Effect": "Allow",
-                "Action": [
-                    "bedrock-agentcore:ListEvents",
-                    "bedrock-agentcore:CreateEvent",
-                    "bedrock-agentcore:GetEvent",
-                    "bedrock-agentcore:DeleteEvent",
-                    "bedrock-agentcore:ListMemories",
-                    "bedrock-agentcore:GetMemory"
-                ],
-                "Resource": "arn:aws:bedrock-agentcore:us-east-1:*:memory/*"
-            }]
-        }'
-    
-    print_success "IAM permissions added"
-}
-
-# Step 5.9
-export_agent_arn() {
-    print_status "Step 5.9: Exporting Agent Runtime ARN and redeploying serverless..."
-    cd "$PROJECT_ROOT/agentic"
-    
-    AGENT_RUNTIME_ARN=$(grep 'agent_arn:' .bedrock_agentcore.yaml | awk '{print $2}')
-    echo "Agent ARN: $AGENT_RUNTIME_ARN"
-    
-    cd "$PROJECT_ROOT"
-    sed -i '' "s|^AGENT_RUNTIME_ARN=.*|AGENT_RUNTIME_ARN=$AGENT_RUNTIME_ARN|" .env
+# Redeploy serverless stack with Agent Runtime ARN
+redeploy_serverless() {
+    print_status "Redeploying serverless stack with Agent Runtime ARN..."
     
     cd "$PROJECT_ROOT/serverless"
     set -a && source "$PROJECT_ROOT/.env" && set +a
+    
+    if [ -z "${AGENT_RUNTIME_ARN:-}" ]; then
+        print_error "AGENT_RUNTIME_ARN not set in root .env"
+        exit 1
+    fi
+    
+    npm install
     cdk deploy --require-approval never
     
-    cd "$PROJECT_ROOT"
-    print_success "Agent ARN exported and serverless redeployed"
+    print_success "Serverless stack redeployed"
 }
 
 main() {
-    echo -e "${BLUE}=== Agentic Architecture Setup ===${NC}\n"
+    echo -e "${BLUE}=== Agentic Architecture Setup (CDK-based) ===${NC}\n"
     
     check_prerequisites
     validate_env
-    cleanup_previous_state
-    deploy_gateway
-    export_gateway_url
-    setup_python_env
-    create_runtime_role
-    add_runtime_role_permissions
-    configure_agentcore
-    deploy_agent
-    add_iam_permissions
-    export_agent_arn
+    deploy_cdk_stack
+    export_outputs
+    redeploy_serverless
     
     echo -e "\n${GREEN}✅ Agentic setup complete!${NC}"
+    echo ""
+    echo "Resources created:"
+    echo "  - x402 Payment Gateway (API Gateway + Lambda)"
+    echo "  - AgentCore Runtime (container-based)"
+    echo "  - AgentCore Memory (short-term, 30-day expiry)"
+    echo "  - ECR Repository for agent container"
+    echo ""
+    echo "Environment variables exported to:"
+    echo "  - agentic/.env (GATEWAY_URL, BEDROCK_AGENTCORE_MEMORY_ID)"
+    echo "  - .env (AGENT_RUNTIME_ARN)"
 }
 
 main "$@"

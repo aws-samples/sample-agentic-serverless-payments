@@ -34,7 +34,7 @@ The numbers in the following flow correspond to an autonomous agent executing st
 
 6. **Payment Authorization:** The agent calls `make_payment`. The tool verifies sufficient balance exists and sets `auth:true` in session storage. This marks the user's intent to proceed with payment but does not transfer funds
 
-7. **Initial x402 Request:** The agent calls `generate_image` again. The tool finds auth: true and creates an x402 HTTP client using the CDP AgentKit wallet's dynamically exported private key. The client sends a POST request to Amazon API Gateway without an `PAYMENT-SIGNATURE` header.
+7. **Initial x402 Request:** The agent calls `generate_image` again. The tool finds `auth:true` and creates an x402 HTTP client using the CDP AgentKit wallet's dynamically exported private key. The client sends a POST request to Amazon API Gateway without an `PAYMENT-SIGNATURE` header.
 
 8. **402 Payment Required:** AWS Lambda receives the request and returns `HTTP 402` with payment requirements. The response includes the USDC amount in wei, seller wallet address, USDC contract address, and `EIP-712` domain parameters (name: 'USDC', version: '2', chainId: 84532).
 

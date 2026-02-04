@@ -31,34 +31,6 @@ delete_amplify() {
     fi
 }
 
-delete_agentcore() {
-    print_status "Deleting AgentCore Runtime..."
-    cd "$PROJECT_ROOT/agentic"
-    
-    if [ -d "venv" ] && [ -f ".bedrock_agentcore.yaml" ]; then
-        source venv/bin/activate
-        agentcore destroy --force || print_warning "AgentCore destroy failed or not found"
-        deactivate
-        print_success "AgentCore deleted"
-    else
-        print_warning "AgentCore not configured"
-    fi
-}
-
-delete_agentic_cdk() {
-    print_status "Deleting Agentic CDK stack..."
-    cd "$PROJECT_ROOT/agentic/cdk"
-    
-    if [ -d "node_modules" ]; then
-        cdk destroy --force || print_warning "Agentic CDK stack not found"
-        print_success "Agentic CDK stack deleted"
-    else
-        print_warning "Agentic CDK not installed"
-    fi
-    
-    cd "$PROJECT_ROOT"
-}
-
 delete_serverless_cdk() {
     print_status "Deleting Serverless CDK stack..."
     cd "$PROJECT_ROOT/serverless"
@@ -73,16 +45,36 @@ delete_serverless_cdk() {
     cd "$PROJECT_ROOT"
 }
 
-delete_ecr_repository() {
-    print_status "Deleting ECR repository..."
+delete_agentic_cdk() {
+    print_status "Deleting Agentic CDK stack (Gateway + AgentCore Runtime + Memory)..."
+    cd "$PROJECT_ROOT/agentic/cdk"
     
-    # Delete bedrock-agentcore-agent repository if it exists
-    if aws ecr describe-repositories --repository-names bedrock-agentcore-agent &>/dev/null; then
-        aws ecr delete-repository --repository-name bedrock-agentcore-agent --force
-        print_success "ECR repository deleted"
+    if [ -d "node_modules" ]; then
+        # CDK destroy handles: API Gateway, Lambda, ECR, AgentCore Runtime, AgentCore Memory
+        cdk destroy --force || print_warning "Agentic CDK stack not found"
+        print_success "Agentic CDK stack deleted"
     else
-        print_warning "ECR repository not found"
+        print_warning "Agentic CDK not installed"
     fi
+    
+    cd "$PROJECT_ROOT"
+}
+
+delete_cloudwatch_logs() {
+    print_status "Deleting CloudWatch log groups..."
+    
+    # Delete Lambda log groups (created at runtime, not by CDK)
+    for prefix in "/aws/lambda/AiContent" "/aws/lambda/X402" "/aws/codebuild/X402" "/aws/bedrock-agentcore/runtimes/x402_payment_agent"; do
+        log_groups=$(aws logs describe-log-groups --log-group-name-prefix "$prefix" --query 'logGroups[*].logGroupName' --output text 2>/dev/null || true)
+        if [ -n "$log_groups" ] && [ "$log_groups" != "None" ]; then
+            for lg in $log_groups; do
+                aws logs delete-log-group --log-group-name "$lg" 2>/dev/null || true
+            done
+            print_success "Deleted log groups with prefix: $prefix"
+        fi
+    done
+    
+    print_success "CloudWatch log groups cleaned"
 }
 
 cleanup_local_files() {
@@ -101,9 +93,7 @@ cleanup_local_files() {
         serverless/bin/*.d.ts \
         agentic/cdk/node_modules/ \
         agentic/cdk/cdk.out/ \
-        agentic/venv/ \
-        agentic/.bedrock_agentcore/ \
-        agentic/.bedrock_agentcore.yaml
+        agentic/lambda/node_modules/
     
     print_success "Local files cleaned"
 }
@@ -113,11 +103,10 @@ main() {
     
     echo "This will delete:"
     echo "1. Amplify app (if deployed)"
-    echo "2. AgentCore Runtime and Memory"
-    echo "3. ECR repository"
-    echo "4. Agentic CDK stack"
-    echo "5. Serverless CDK stack"
-    echo "6. Local build files"
+    echo "2. Serverless CDK stack"
+    echo "3. Agentic CDK stack (includes AgentCore Runtime, Memory, ECR, Gateway)"
+    echo "4. CloudWatch log groups"
+    echo "5. Local build files"
     echo ""
     
     read -p "Are you sure? This cannot be undone. (y/N): " -n 1 -r
@@ -127,11 +116,11 @@ main() {
         exit 0
     fi
     
+    # Delete in reverse order of dependencies
     delete_amplify
-    delete_agentcore
-    delete_ecr_repository
-    delete_agentic_cdk
     delete_serverless_cdk
+    delete_agentic_cdk
+    delete_cloudwatch_logs
     cleanup_local_files
     
     echo -e "\n${GREEN}✅ Cleanup complete!${NC}"

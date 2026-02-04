@@ -74,7 +74,7 @@ The numbers in the following flow correspond to an autonomous agent executing st
 
 6. **Payment Authorization:** The agent calls `make_payment`. The tool verifies sufficient balance exists and sets `auth:true` in session storage. This marks the user's intent to proceed with payment but does not transfer funds
 
-7. **Initial x402 Request:** The agent calls `generate_image` again. The tool finds auth: true and creates an x402 HTTP client using the CDP AgentKit wallet's dynamically exported private key. The client sends a POST request to Amazon API Gateway without an `PAYMENT-SIGNATURE` header.
+7. **Initial x402 Request:** The agent calls `generate_image` again. The tool finds `auth:true` and creates an x402 HTTP client using the CDP AgentKit wallet's dynamically exported private key. The client sends a POST request to Amazon API Gateway without an `PAYMENT-SIGNATURE` header.
 
 8. **402 Payment Required:** AWS Lambda receives the request and returns `HTTP 402` with payment requirements. The response includes the USDC amount in wei, seller wallet address, USDC contract address, and `EIP-712` domain parameters (name: 'USDC', version: '2', chainId: 84532).
 
@@ -150,9 +150,8 @@ Agentic maintains warm WebSocket connections, eliminating connection establishme
 4. AWS CLI configured with credentials
 5. USDC on Base Sepolia for testing (obtain from [Circle Faucet](https://faucet.circle.com/))
 6. WalletConnect Project ID from [Reown Cloud](https://cloud.reown.com)
-7. Python 3.11 or later (required for AgentCore CLI, installed in Step 5.3)
-8. CDP API credentials from [Coinbase Developer Platform](https://portal.cdp.coinbase.com)
-9. Bash shell (Windows users: use WSL or Git Bash)
+7. CDP API credentials from [Coinbase Developer Platform](https://portal.cdp.coinbase.com)
+8. Bash shell (Windows users: use WSL or Git Bash)
 
 #### Clone Repository
 
@@ -462,36 +461,30 @@ APP_ID=$(aws amplify list-apps --query "apps[?name=='ai-content-monetization'].a
 aws amplify delete-app --app-id $APP_ID
 ```
 
-**2. Delete AgentCore Runtime and Memory (if deployed):**
+**2. Delete Agentic CDK stack:**
 
 ```bash
-cd agentic
-source venv/bin/activate
-agentcore destroy
+cd agentic/cdk && cdk destroy --force && cd ../..
 ```
 
-**3. Delete ECR repository (if created):**
-
-```bash
-aws ecr delete-repository --repository-name bedrock-agentcore-agent --force
-```
-
-**4. Delete Agentic CDK stack:**
-
-```bash
-cd cdk && cdk destroy --force && cd ../..
-```
-
-**5. Delete Serverless CDK stack:**
+**3. Delete Serverless CDK stack:**
 
 ```bash
 cd serverless && cdk destroy --force && cd ..
 ```
 
-**6. Clean up local files:**
+**4. Delete CloudWatch log groups:**
 
 ```bash
-rm -rf node_modules/ dist/ serverless/node_modules/ serverless/cdk.out/ serverless/outputs.json serverless/lib/*.js serverless/lib/*.d.ts serverless/bin/*.js serverless/bin/*.d.ts agentic/cdk/node_modules/ agentic/cdk/cdk.out/ agentic/venv/ agentic/.bedrock_agentcore/ agentic/.bedrock_agentcore.yaml
+for prefix in "/aws/lambda/AiContent" "/aws/lambda/X402" "/aws/codebuild/X402" "/aws/bedrock-agentcore/runtimes/x402_payment_agent"; do
+  aws logs describe-log-groups --log-group-name-prefix "$prefix" --query 'logGroups[*].logGroupName' --output text | xargs -n1 aws logs delete-log-group --log-group-name 2>/dev/null
+done
+```
+
+**5. Clean up local files:**
+
+```bash
+rm -rf node_modules/ dist/ serverless/node_modules/ serverless/cdk.out/ serverless/outputs.json serverless/lib/*.js serverless/lib/*.d.ts serverless/bin/*.js serverless/bin/*.d.ts agentic/cdk/node_modules/ agentic/cdk/cdk.out/ agentic/lambda/node_modules/
 ```
 
 ## Troubleshooting
