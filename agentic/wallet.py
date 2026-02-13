@@ -78,9 +78,19 @@ class _CdpWalletAccountAdapter:
                 f"Unable to determine EIP-712 primary type from message types: {list(message_types.keys())}"
             )
 
+        # CDP requires EIP712Domain in types
+        types_with_domain = dict(message_types)
+        if "EIP712Domain" not in types_with_domain:
+            types_with_domain["EIP712Domain"] = [
+                {"name": "name", "type": "string"},
+                {"name": "version", "type": "string"},
+                {"name": "chainId", "type": "uint256"},
+                {"name": "verifyingContract", "type": "address"}
+            ]
+
         typed_data = {
             "domain": domain_data,
-            "types": message_types,
+            "types": types_with_domain,
             "primaryType": primary_types[0],
             "message": _normalize_typed_data_values(message_data),
         }
