@@ -9,7 +9,6 @@ from coinbase_agentkit import (
 from web3_provider import get_web3
 from web3 import Web3
 from x402.clients.httpx import x402HttpxClient
-from eth_account import Account
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -41,32 +40,75 @@ ERC20_ABI = [
     }
 ]
 
+class _SignedMessageAdapter:
+    """Minimal adapter for x402's expected signed message shape."""
+
+    def __init__(self, signature_hex: str):
+        if not isinstance(signature_hex, str):
+            raise ValueError("Expected hex string signature from CDP wallet signer")
+
+        normalized = signature_hex[2:] if signature_hex.startswith("0x") else signature_hex
+        self.signature = bytes.fromhex(normalized)
+
+
+def _normalize_typed_data_values(value):
+    """Convert bytes values to 0x-prefixed hex for CDP typed-data signing."""
+    if isinstance(value, (bytes, bytearray)):
+        return "0x" + bytes(value).hex()
+    if isinstance(value, dict):
+        return {k: _normalize_typed_data_values(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_normalize_typed_data_values(v) for v in value]
+    return value
+
+
+class _CdpWalletAccountAdapter:
+    """Adapter so legacy x402 client can sign via CDP without key export."""
+
+    def __init__(self, wallet):
+        if not hasattr(wallet, "sign_typed_data"):
+            raise ValueError("Wallet does not support sign_typed_data required by x402")
+        self._wallet = wallet
+        self.address = wallet.get_address()
+
+    def sign_typed_data(self, domain_data, message_types, message_data):
+        primary_types = [name for name in message_types if name != "EIP712Domain"]
+        if len(primary_types) != 1:
+            raise ValueError(
+                f"Unable to determine EIP-712 primary type from message types: {list(message_types.keys())}"
+            )
+
+        # CDP requires EIP712Domain in types
+        types_with_domain = dict(message_types)
+        if "EIP712Domain" not in types_with_domain:
+            types_with_domain["EIP712Domain"] = [
+                {"name": "name", "type": "string"},
+                {"name": "version", "type": "string"},
+                {"name": "chainId", "type": "uint256"},
+                {"name": "verifyingContract", "type": "address"}
+            ]
+
+        typed_data = {
+            "domain": domain_data,
+            "types": types_with_domain,
+            "primaryType": primary_types[0],
+            "message": _normalize_typed_data_values(message_data),
+        }
+
+        signature = self._wallet.sign_typed_data(typed_data)
+        return _SignedMessageAdapter(signature)
+
+
 def get_x402_httpx_client(wallet, base_url: str):
-    """Create x402 HTTP client with CDP wallet for autonomous payments.
-    
-    Dynamically exports private key from CDP wallet on each call.
-    This ensures x402 always has the correct key even if the wallet
-    changes across AgentCore container restarts.
-    """
+    """Create x402 HTTP client using CDP-managed signing (no key export)."""
     from x402.clients.base import x402Client
-    import asyncio
-    
-    wallet_address = wallet.get_address()
-    
-    # Export signing key from CDP wallet
-    client = wallet.get_client()
-    
-    async def export_key():
-        async with client as cdp:
-            return await cdp.evm.export_account(address=wallet_address)
-    
+
     try:
-        private_key = asyncio.run(export_key())
-        account = Account.from_key(private_key)
-        logger.info('Dynamically exported CDP wallet key for x402')
+        account = _CdpWalletAccountAdapter(wallet)
+        logger.info('Using CDP wallet signer for x402 (private key remains in CDP)')
     except Exception as e:
-        logger.error(f'Failed to export CDP wallet key: {e}')
-        raise ValueError(f'Failed to export CDP wallet private key for x402: {e}') from e
+        logger.error(f'Failed to configure CDP wallet signer: {e}')
+        raise ValueError(f'Failed to configure CDP wallet signing for x402: {e}') from e
     
     def payment_selector(accepts, network_filter=None, scheme_filter=None, max_value=None):
         return x402Client.default_payment_requirements_selector(

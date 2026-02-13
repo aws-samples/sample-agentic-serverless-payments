@@ -34,11 +34,11 @@ The numbers in the following flow correspond to an autonomous agent executing st
 
 6. **Payment Authorization:** The agent calls `make_payment`. The tool verifies sufficient balance exists and sets `auth:true` in session storage. This marks the user's intent to proceed with payment but does not transfer funds
 
-7. **Initial x402 Request:** The agent calls `generate_image` again. The tool finds `auth:true` and creates an x402 HTTP client using the CDP AgentKit wallet's dynamically exported private key. The client sends a POST request to Amazon API Gateway without an `PAYMENT-SIGNATURE` header.
+7. **Initial x402 Request:** The agent calls `generate_image` again. The tool finds `auth:true` and creates an x402 HTTP client that signs with the CDP AgentKit wallet through CDP APIs (no private key export). The client sends a POST request to Amazon API Gateway without an `PAYMENT-SIGNATURE` header.
 
 8. **402 Payment Required:** AWS Lambda receives the request and returns `HTTP 402` with payment requirements. The response includes the USDC amount in wei, seller wallet address, USDC contract address, and `EIP-712` domain parameters (name: 'USDC', version: '2', chainId: 84532).
 
-9. **EIP-712 Signature Generation:** The x402 client receives the 402 response and constructs `EIP-712` typed data. It signs the data using the CDP AgentKit wallet's `private key`, base64-encodes the signature payload, and retries the POST request with the signature in the `PAYMENT-SIGNATURE` header.
+9. **EIP-712 Signature Generation:** The x402 client receives the 402 response and constructs `EIP-712` typed data. It requests a signature from the CDP-managed wallet, base64-encodes the signature payload, and retries the POST request with the signature in the `PAYMENT-SIGNATURE` header.
 
 10. **Payment Verification:** Lambda extracts the payment payload from the `PAYMENT-SIGNATURE` header. It checks the nonce against the `processedPayments` map to prevent replay attacks. Lambda sends the signature to the x402.org facilitator's `/verify` endpoint, which validates the `EIP-712` signature against the USDC contract domain on Base Sepolia.
 
