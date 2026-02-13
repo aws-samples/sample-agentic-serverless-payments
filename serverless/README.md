@@ -18,7 +18,7 @@ For full platform deployment including the agentic architecture, refer to the ma
 
 ![AWS Serverless x402 Payments Architecture](../assets/AWS-Serverless-X402-Payments.png)
 
-The solution includes three main components: Request Initiation (salmon arrows, steps 1-2, 5, 12), Payment Processing (green arrows, steps 3-4, 6, 7-9), and Content Delivery (orange arrows, steps 10-11).
+The solution includes three main components: Request Initiation (salmon arrows, steps 1-2, 5, 11), Payment Processing (green arrows, steps 3-4, 6-7, 9), and Content Delivery (orange arrows, steps 8, 10).
 
 The numbers in the following flow correspond to the serverless stablecoin payment for AI-generated content:
 
@@ -26,7 +26,7 @@ The numbers in the following flow correspond to the serverless stablecoin paymen
 
 2. **Initial Request:** The user submits a prompt through the chat interface. The application sends a POST request to the `/generate` endpoint on Amazon API Gateway without payment credentials.
 
-3. **Cost Estimation:** The Estimator Lambda function uses Amazon Bedrock `CountTokens` API to calculate input tokens. It estimates output tokens using a conservative formula (minimum 800 tokens with 20% safety margin) and applies Amazon Nova 2 Lite pricing ($0.0003 input, $0.0025 output per 1K tokens). Amazon Nova Canvas returns a fixed $0.04 per image.
+3. **Cost Estimation:** The Estimator Lambda function uses Amazon Bedrock `CountTokens` API to calculate input tokens. It estimates output tokens using a conservative formula (minimum 800 tokens with 20% safety margin) and estimates pricing based on the selected model.
 
 4. **Payment Requirements:** The Seller Lambda function detects the missing `PAYMENT-SIGNATURE` header and returns `HTTP 402`. The response includes the USDC amount in wei, the seller wallet address, the USDC contract address on Base Sepolia, and `EIP-712` domain parameters.
 
@@ -34,17 +34,15 @@ The numbers in the following flow correspond to the serverless stablecoin paymen
 
 6. **Payment Submission:** The frontend retries the `/generate` request with the `EIP-712` signature in the `PAYMENT-SIGNATURE` header. The request includes the authorization object (from, to, value, validAfter, validBefore, nonce) and signature.
 
-7. **Idempotency Check:** The Seller Lambda extracts the nonce and checks an in-memory cache to prevent replay attacks. If the nonce exists, it returns `HTTP 409`.
+7. **Payment Verification:** The AWS Lambda function sends the payment payload to the x402.org facilitator's `/verify` endpoint. The facilitator validates the `EIP-712` signature against the USDC contract domain on Base Sepolia.
 
-8. **Payment Verification:** The AWS Lambda function sends the payment payload to the x402.org facilitator's `/verify` endpoint. The facilitator validates the `EIP-712` signature against the USDC contract domain on Base Sepolia.
+8. **Content Generation:** The AWS Lambda function invokes the Bedrock Lambda function. For text, it calls Amazon Nova 2 Lite using the `invoke_model` API. For images, it invokes Amazon Nova Canvas.
 
-9. **Payment Settlement:** The Lambda calls the facilitator's `/settle` endpoint. The facilitator executes the USDC transfer on-chain using `EIP-3009 transferWithAuthorization` and returns the transaction hash.
+9. **Payment Settlement:** After successful content generation, the Lambda calls the facilitator's `/settle` endpoint. The facilitator executes the USDC transfer on-chain using `EIP-3009 transferWithAuthorization` and returns the transaction hash. The Lambda includes the settlement details in the `PAYMENT-RESPONSE` header.
 
-10. **Content Generation:** The AWS Lambda function invokes the Bedrock Lambda function. For text, it calls Amazon Nova 2 Lite using the `invoke_model` API. For images, it invokes Amazon Nova Canvas.
+10. **Response Delivery:** The Bedrock Lambda returns the generated content. The Seller Lambda constructs a response with the success message, transaction url (`https://sepolia.basescan.org/tx/{hash}`), and generated content.
 
-11. **Response Delivery:** The Bedrock Lambda returns the generated content. The Seller Lambda constructs a response with the success message, transaction url (`https://sepolia.basescan.org/tx/{hash}`), and generated content.
-
-12. **Frontend Display:** The application displays the payment confirmation, transaction hash, and AI-generated content in the chat interface.
+11. **Frontend Display:** The application displays the payment confirmation, transaction hash, and AI-generated content in the chat interface.
 
 ## Using the Platform
 

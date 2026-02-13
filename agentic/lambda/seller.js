@@ -266,7 +266,7 @@ app.use('/generate_image', async (c, next) => {
     console.log('Seller wallet:', sellerWallet);
     console.log('Asset (USDC):', X402_CONFIG.usdcBase);
     
-    // Verify payment with x402.org facilitator (use inner payload)
+    // Verify payment with x402.org facilitator (do NOT settle yet - settle after content delivery per x402 spec)
     const verification = await verifyPayment(paymentPayload.payload || paymentPayload, paymentRequirements);
     if (!verification.isValid) {
       return c.json({ 
@@ -277,35 +277,20 @@ app.use('/generate_image', async (c, next) => {
     
     console.log('Payment verified successfully!');
     
-    // Settle payment with x402.org facilitator (use inner payload)
-    // Note: Settlement may fail on testnet, but verification is sufficient
-    // We proceed even if settlement fails since verification passed
-    let transactionHash = null;
-    try {
-      const settlement = await settlePayment(paymentPayload.payload || paymentPayload, paymentRequirements);
-      if (settlement.success) {
-        console.log('Payment settled successfully');
-        console.log('Transaction:', settlement.transaction);
-        transactionHash = settlement.transaction;
-      } else {
-        console.log('Settlement failed (testnet expected), but verification passed - proceeding');
-        console.log('Reason:', settlement.errorReason);
-      }
-    } catch (error) {
-      console.log('Settlement error (testnet expected):', error.message);
-      console.log('Proceeding since verification passed');
-    }
+    // Store payment data for deferred settlement via /settle endpoint
+    c.set('paymentPayload', paymentPayload);
+    c.set('paymentRequirements', paymentRequirements);
+    c.set('nonce', nonce);
     
-    // Store transaction hash in context for endpoint to use
-    c.set('transactionHash', transactionHash);
-    
-    // Mark transaction as processed using nonce
+    // Mark nonce as pending (prevents replay while awaiting settlement)
     if (nonce) {
-      processedPayments.set(nonce, Date.now());
-      // Clean old entries (older than 1 hour)
+      processedPayments.set(nonce, { timestamp: Date.now(), status: 'pending', paymentPayload: paymentPayload.payload || paymentPayload, paymentRequirements });
+      
+      // Clean up stale pending entries (never settled, e.g. Bedrock failure) and old settled entries
       const oneHourAgo = Date.now() - 3600000;
-      for (const [n, timestamp] of processedPayments.entries()) {
-        if (timestamp < oneHourAgo) processedPayments.delete(n);
+      for (const [n, entry] of processedPayments.entries()) {
+        const ts = typeof entry === 'object' ? entry.timestamp : entry;
+        if (ts < oneHourAgo) processedPayments.delete(n);
       }
     }
     
@@ -316,19 +301,17 @@ app.use('/generate_image', async (c, next) => {
   }
 });
 
-// Protected generate_image endpoint - payment required
+// Protected generate_image endpoint - payment verified, content can proceed
 app.post('/generate_image', async (c) => {
   try {
     const body = await c.req.json();
-    
-    // Get transaction hash from context (set by middleware)
-    const transactionHash = c.get('transactionHash');
+    const nonce = c.get('nonce');
     
     return c.json({ 
       status: 'payment_verified',
       request_id: body.request_id,
       message: 'Payment verified - proceed with image generation',
-      transaction_hash: transactionHash || null
+      nonce: nonce || null
     });
   } catch (error) {
     console.error('Generate error:', error);
@@ -336,6 +319,56 @@ app.post('/generate_image', async (c) => {
       status: 'error',
       error: error.message
     }, 500);
+  }
+});
+
+// x402 spec: settle after content delivery (fair billing - only charge on success)
+app.post('/settle', async (c) => {
+  try {
+    const body = await c.req.json();
+    const { nonce } = body;
+    
+    if (!nonce) {
+      return c.json({ error: 'Missing nonce' }, 400);
+    }
+    
+    // Look up pending payment data by nonce
+    const pendingPayment = processedPayments.get(nonce);
+    if (!pendingPayment || pendingPayment.status !== 'pending') {
+      return c.json({ error: 'No pending payment found for nonce' }, 404);
+    }
+    
+    const { paymentPayload, paymentRequirements } = pendingPayment;
+    
+    let transactionHash = null;
+    try {
+      const settlement = await settlePayment(paymentPayload, paymentRequirements);
+      if (settlement.success) {
+        console.log('Payment settled successfully');
+        console.log('Transaction:', settlement.transaction);
+        transactionHash = settlement.transaction;
+      } else {
+        console.log('Settlement failed (testnet expected):', settlement.errorReason);
+      }
+    } catch (error) {
+      console.log('Settlement error (testnet expected):', error.message);
+    }
+    
+    // Mark as settled and clean old entries
+    processedPayments.set(nonce, { timestamp: Date.now(), status: 'settled' });
+    const oneHourAgo = Date.now() - 3600000;
+    for (const [n, entry] of processedPayments.entries()) {
+      const ts = typeof entry === 'object' ? entry.timestamp : entry;
+      if (ts < oneHourAgo) processedPayments.delete(n);
+    }
+    
+    return c.json({
+      status: 'settled',
+      transaction_hash: transactionHash
+    });
+  } catch (error) {
+    console.error('Settlement error:', error);
+    return c.json({ error: error.message }, 500);
   }
 });
 

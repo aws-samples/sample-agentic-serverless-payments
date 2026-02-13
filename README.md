@@ -10,6 +10,7 @@ This solution demonstrates pay-per-use AI content generation using the x402 paym
   - [Serverless](#serverless)
   - [Agentic](#agentic)
 - [Architecture Comparison](#architecture-comparison)
+- [Scaling with CloudFront and Lambda@Edge](#scaling-with-cloudfront-and-lambdaedge)
 - [Deployment](#deployment)
   - [Prerequisites](#prerequisites)
   - [Quick Start](#quick-start)
@@ -26,7 +27,7 @@ This solution demonstrates pay-per-use AI content generation using the x402 paym
 
 ![AWS Serverless x402 Payments Architecture](assets/AWS-Serverless-X402-Payments.png)
 
-The solution includes three main components: Request Initiation (salmon arrows, steps 1-2, 5, 12), Payment Processing (green arrows, steps 3-4, 6, 7-9), and Content Delivery (orange arrows, steps 10-11).
+The solution includes three main components: Request Initiation (salmon arrows, steps 1-2, 5, 11), Payment Processing (green arrows, steps 3-4, 6-7, 9), and Content Delivery (orange arrows, steps 8, 10).
 
 The numbers in the following flow correspond to the serverless stablecoin payment for AI-generated content:
 
@@ -34,7 +35,7 @@ The numbers in the following flow correspond to the serverless stablecoin paymen
 
 2. **Initial Request:** The user submits a prompt through the chat interface. The application sends a POST request to the `/generate` endpoint on Amazon API Gateway without payment credentials.
 
-3. **Cost Estimation:** The Estimator Lambda function uses Amazon Bedrock `CountTokens` API to calculate input tokens. It estimates output tokens using a conservative formula (minimum 800 tokens with 20% safety margin) and applies Amazon Nova 2 Lite pricing ($0.0003 input, $0.0025 output per 1K tokens). Amazon Nova Canvas returns a fixed $0.04 per image.
+3. **Cost Estimation:** The Estimator Lambda function uses Amazon Bedrock `CountTokens` API to calculate input tokens. It estimates output tokens using a conservative formula (minimum 800 tokens with 20% safety margin) and estimates pricing based on the selected model.
 
 4. **Payment Requirements:** The Seller Lambda function detects the missing `PAYMENT-SIGNATURE` header and returns `HTTP 402`. The response includes the USDC amount in wei, the seller wallet address, the USDC contract address on Base Sepolia, and `EIP-712` domain parameters.
 
@@ -42,23 +43,21 @@ The numbers in the following flow correspond to the serverless stablecoin paymen
 
 6. **Payment Submission:** The frontend retries the `/generate` request with the `EIP-712` signature in the `PAYMENT-SIGNATURE` header. The request includes the authorization object (from, to, value, validAfter, validBefore, nonce) and signature.
 
-7. **Idempotency Check:** The Seller Lambda extracts the nonce and checks an in-memory cache to prevent replay attacks. If the nonce exists, it returns `HTTP 409`.
+7. **Payment Verification:** The AWS Lambda function sends the payment payload to the x402.org facilitator's `/verify` endpoint. The facilitator validates the `EIP-712` signature against the USDC contract domain on Base Sepolia.
 
-8. **Payment Verification:** The AWS Lambda function sends the payment payload to the x402.org facilitator's `/verify` endpoint. The facilitator validates the `EIP-712` signature against the USDC contract domain on Base Sepolia.
+8. **Content Generation:** The AWS Lambda function invokes the Bedrock Lambda function. For text, it calls Amazon Nova 2 Lite using the `invoke_model` API. For images, it invokes Amazon Nova Canvas.
 
-9. **Payment Settlement:** The Lambda calls the facilitator's `/settle` endpoint. The facilitator executes the USDC transfer on-chain using `EIP-3009 transferWithAuthorization` and returns the transaction hash.
+9. **Payment Settlement:** After successful content generation, the Lambda calls the facilitator's `/settle` endpoint. The facilitator executes the USDC transfer on-chain using `EIP-3009 transferWithAuthorization` and returns the transaction hash. The Lambda includes the settlement details in the `PAYMENT-RESPONSE` header.
 
-10. **Content Generation:** The AWS Lambda function invokes the Bedrock Lambda function. For text, it calls Amazon Nova 2 Lite using the `invoke_model` API. For images, it invokes Amazon Nova Canvas.
+10. **Response Delivery:** The Bedrock Lambda returns the generated content. The Seller Lambda constructs a response with the success message, transaction url (`https://sepolia.basescan.org/tx/{hash}`), and generated content.
 
-11. **Response Delivery:** The Bedrock Lambda returns the generated content. The Seller Lambda constructs a response with the success message, transaction url (`https://sepolia.basescan.org/tx/{hash}`), and generated content.
-
-12. **Frontend Display:** The application displays the payment confirmation, transaction hash, and AI-generated content in the chat interface.
+11. **Frontend Display:** The application displays the payment confirmation, transaction hash, and AI-generated content in the chat interface.
 
 ### Agentic
 
 ![AWS Agentic x402 Payments Architecture](assets/AWS-Agentic-X402-Payments.png)
 
-The solution includes three main components: Request Initiation (salmon arrows, steps 1-2), Payment Processing (green arrows, steps 4-11), and Content Delivery (orange arrows, steps 3, 12-14).
+The solution includes three main components: Request Initiation (salmon arrows, steps 1-2), Payment Processing (green arrows, steps 4-10, 12), and Content Delivery (orange arrows, steps 3, 11, 13-14).
 
 The numbers in the following flow correspond to an autonomous agent executing stablecoin payments for AI-generated content:
 
@@ -68,11 +67,11 @@ The numbers in the following flow correspond to an autonomous agent executing st
 
 3. **Agent Initialization:** Amazon Bedrock AgentCore loads the agent configuration and initializes Amazon Bedrock AgentCore Memory for session storage. The agent using Anthropic Claude Sonnet 4.5 as the reasoning engine, receives the prompt and determines the required action.
 
-4. **Cost Estimation:** The agent invokes the `estimate_image_cost` tool. The tool calculates the fixed cost ($0.04 USDC for `1024x1024` standard quality) and generates a unique request ID. The cost, prompt, and authorization status (`auth: false`) are stored in Amazon Bedrock AgentCore Memory.
+4. **Cost Estimation:** The agent invokes the `estimate_image_cost` tool. The tool calculates the cost and generates a unique request ID. The cost, prompt, and authorization status (`auth: false`) are stored in Amazon Bedrock AgentCore Memory.
 
 5. **Authorization Check:** The agent calls `generate_image` tool. The tool checks the authorization status in session storage and finds `auth:false`. The tool returns `AUTHORIZE_CHECK` status directly to the agent without calling the gateway. This confirms user intent to pay and is not part of the x402 flow. The check is automatic but can be an explicit natural language confirmation corresponding to an CDP AgentKit wallet’s allowance.
 
-6. **Payment Authorization:** The agent calls `make_payment`. The tool verifies sufficient balance exists and sets `auth:true` in session storage. This marks the user's intent to proceed with payment but does not transfer funds
+6. **Payment Authorization:** The agent calls `make_payment`. The tool verifies sufficient balance exists and sets `auth:true` in session storage. This marks the user's intent to proceed with payment but does not transfer funds.
 
 7. **Initial x402 Request:** The agent calls `generate_image` again. The tool finds `auth:true` and creates an x402 HTTP client that signs with the CDP AgentKit wallet through CDP APIs (no private key export). The client sends a POST request to Amazon API Gateway without an `PAYMENT-SIGNATURE` header.
 
@@ -80,13 +79,13 @@ The numbers in the following flow correspond to an autonomous agent executing st
 
 9. **EIP-712 Signature Generation:** The x402 client receives the 402 response and constructs `EIP-712` typed data. It requests a signature from the CDP-managed wallet, base64-encodes the signature payload, and retries the POST request with the signature in the `PAYMENT-SIGNATURE` header.
 
-10. **Payment Verification:** Lambda extracts the payment payload from the `PAYMENT-SIGNATURE` header. It checks the nonce against the `processedPayments` map to prevent replay attacks. Lambda sends the signature to the x402.org facilitator's `/verify` endpoint, which validates the `EIP-712` signature against the USDC contract domain on Base Sepolia.
+10. **Payment Verification:** Lambda extracts the payment payload from the `PAYMENT-SIGNATURE` header. Lambda sends the signature to the x402.org facilitator's `/verify` endpoint, which validates the `EIP-712` signature against the USDC contract domain on Base Sepolia.
 
-11. **Payment Settlement:** AWS Lambda calls the facilitator's `/settle` endpoint. The facilitator executes the USDC transfer on Base Sepolia using `EIP-3009 transferWithAuthorization` and returns the transaction hash. Lambda stores the hash in context, marks the nonce as processed, and returns `HTTP 200` with payment confirmation.
+11. **Image Generation:** The tool invokes Amazon Nova Canvas model using the `invoke_model` API. Nova Canvas generates a `1024x1024` image based on the prompt.
 
-12. **Image Generation:** The tool invokes Amazon Nova Canvas model using the `invoke_model` API. Nova Canvas generates a `1024x1024` image based on the prompt.
+12. **Payment Settlement:** After successful image generation, the tool calls the seller Lambda's `/settle` endpoint with the nonce. Lambda looks up the pending payment data, calls the x402.org facilitator's `/settle` endpoint, and the facilitator executes the USDC transfer on Base Sepolia using `EIP-3009 transferWithAuthorization`. The transaction hash is returned to the agent.
 
-13. **Response Delivery:** The generated image is stored in Amazon Simple Storage Service , and its unique ID is stored in session storage. The agent returns a success message to the frontend hosted an AWS Amplifywhich includes the base64-encoded image, transaction hash, and a BaseScan explorer link(`https://sepolia.basescan.org/tx/{hash}`) for on-chain verification.
+13. **Response Delivery:** The generated image is stored in Amazon Simple Storage Service, and its unique ID is stored in session storage. The agent returns a success message to the frontend hosted on AWS Amplify which includes the base64-encoded image, transaction hash, and a BaseScan explorer link (`https://sepolia.basescan.org/tx/{hash}`) for on-chain verification.
 
 14. **Session Cleanup:** The tool clears the current request ID from session storage. This allows new image generation requests while maintaining payment history for the session.
 
@@ -139,6 +138,12 @@ Agentic scalability is constrained by WebSocket connection limits and Amazon Bed
 Serverless incurs cold start latency when AWS Lambda functions initialize. Subsequent requests to warm functions complete quickly.
 
 Agentic maintains warm WebSocket connections, eliminating connection establishment overhead. However, Amazon Bedrock AgentCore Runtime introduces reasoning latency as Claude Sonnet 4.5 analyzes prompts and plans tool invocations.
+
+## Scaling with CloudFront and Lambda@Edge
+
+This sample handles x402 payment verification within the application Lambda functions. An alternative approach moves payment verification to the edge using Amazon CloudFront and Lambda@Edge. This separates payment logic from application code and applies x402 to any origin without backend changes.
+
+For a reference implementation of this pattern, see the [CloudFront + Lambda@Edge x402 example](https://github.com/coinbase/x402/tree/main/examples/typescript/servers/cloudfront-lambda-edge) in the Coinbase x402 repository.
 
 ## Deployment
 
