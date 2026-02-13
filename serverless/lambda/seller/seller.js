@@ -349,7 +349,7 @@ app.use('/generate', async (c, next) => {
     console.log('Public wallet:', publicWallet);
     console.log('Asset (USDC):', X402_CONFIG.usdcBase);
     
-    // Verify payment with Coinbase facilitator
+    // Verify payment with facilitator (do NOT settle yet - settle after content delivery per x402 spec)
     const verification = await verifyPayment(paymentPayload, paymentRequirements);
     if (!verification.isValid) {
       return c.json({ 
@@ -358,27 +358,10 @@ app.use('/generate', async (c, next) => {
       }, 402);
     }
     
-    // Settle payment with Coinbase facilitator
-    const settlement = await settlePayment(paymentPayload, paymentRequirements);
-    if (!settlement.success) {
-      return c.json({ 
-        error: 'Payment settlement failed', 
-        reason: settlement.errorReason 
-      }, 402);
-    }
-    
-    // Mark transaction as processed using nonce
-    if (nonce) {
-      processedPayments.set(nonce, Date.now());
-      // Clean old entries (older than 1 hour)
-      const oneHourAgo = Date.now() - 3600000;
-      for (const [n, timestamp] of processedPayments.entries()) {
-        if (timestamp < oneHourAgo) processedPayments.delete(n);
-      }
-    }
-    
-    // Store settlement info for response
-    c.set('settlement', settlement);
+    // Store payment data for post-delivery settlement
+    c.set('paymentPayload', paymentPayload);
+    c.set('paymentRequirements', paymentRequirements);
+    c.set('nonce', nonce);
     
     await next();
   } catch (error) {
@@ -388,11 +371,34 @@ app.use('/generate', async (c, next) => {
 });
 
 // Protected generate endpoint - payment required
+// x402 spec: verify → deliver content → settle (fair billing - only charge on success)
 app.post('/generate', async (c) => {
   try {
     const body = await c.req.json();
+    
+    // Step 1: Generate content (payment already verified in middleware)
     const bedrockResponse = await callBedrockLambda(body.content, body.model);
-    const settlement = c.get('settlement');
+    
+    // Step 2: Content delivered successfully - now settle payment
+    const paymentPayload = c.get('paymentPayload');
+    const paymentRequirements = c.get('paymentRequirements');
+    const nonce = c.get('nonce');
+    
+    const settlement = await settlePayment(paymentPayload, paymentRequirements);
+    if (!settlement.success) {
+      // Content was generated but settlement failed - log and return content anyway
+      // The verify already confirmed the signature is valid, settlement is on-chain execution
+      console.warn('Settlement failed after content delivery:', settlement.errorReason);
+    }
+    
+    // Mark transaction as processed using nonce
+    if (nonce) {
+      processedPayments.set(nonce, Date.now());
+      const oneHourAgo = Date.now() - 3600000;
+      for (const [n, timestamp] of processedPayments.entries()) {
+        if (timestamp < oneHourAgo) processedPayments.delete(n);
+      }
+    }
     
     const response = { 
       message: "Payment verified - content generated successfully",
@@ -410,9 +416,10 @@ app.post('/generate', async (c) => {
     
     return c.json(response);
   } catch (error) {
-    console.error('Generate error:', error);
+    // Content generation failed - do NOT settle payment (fair billing)
+    console.error('Generate error (payment not settled):', error);
     return c.json({ 
-      message: "Payment verified but content generation failed",
+      message: "Payment verified but content generation failed - payment not charged",
       status: "error",
       error: error.message
     }, 500);

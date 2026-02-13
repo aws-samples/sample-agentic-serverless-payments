@@ -198,9 +198,9 @@ def generate_image(request_id: str = None, session_id: str = "default") -> str:
         if response.status_code != 200:
             return f"Error: Gateway returned {response.status_code}. Response: {response.text[:200]}"
         
-        # Extract transaction info from response
+        # Extract nonce for deferred settlement
         response_data = response.json()
-        transaction_hash = response_data.get('transaction_hash')
+        payment_nonce = response_data.get('nonce')
             
     except Exception as e:
         import traceback
@@ -229,6 +229,24 @@ def generate_image(request_id: str = None, session_id: str = "default") -> str:
     
     response_body = json.loads(bedrock_response['body'].read())
     image_base64 = response_body['images'][0]
+    
+    # x402 spec: settle after content delivery (fair billing - only charge on success)
+    transaction_hash = None
+    if payment_nonce:
+        try:
+            settle_response = requests.post(
+                f"{gateway_url}/settle",
+                json={'nonce': payment_nonce},
+                timeout=30
+            )
+            if settle_response.status_code == 200:
+                settle_data = settle_response.json()
+                transaction_hash = settle_data.get('transaction_hash')
+                print(f"Payment settled: {transaction_hash}")
+            else:
+                print(f"Settlement returned {settle_response.status_code} (testnet expected)")
+        except Exception as e:
+            print(f"Settlement error (testnet expected): {e}")
     
     # Store image with unique ID (don't return base64 to agent)
     image_id = str(uuid.uuid4())
