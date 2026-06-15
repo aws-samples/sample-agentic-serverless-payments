@@ -59,14 +59,15 @@ class X402GatewayStack extends cdk.Stack {
 
     // =====================================================================
     // Native WAF x402 monetization in front of the payment gateway HTTP API.
-    // PARKING LOT: MonetizationConfig + Monetize are an AWS WAF preview capability
-    // not yet in released CloudFormation/CDK; injected via L1 addPropertyOverride
-    // and deploy verbatim once support ships. See PR.
+    // AWS WAF AI traffic monetization is GA; its MonetizationConfig + Monetize action
+    // are not yet in the released CloudFormation/CDK (SDK/CFN support expected to
+    // follow shortly), so they're injected via L1 addPropertyOverride. See PR.
     //
-    // The rule statements (raw CFN, PascalCase — including the preview Monetize
-    // action) are supplied via addPropertyOverride('Rules', ...) so the L1 prop
-    // validator passes them through verbatim. They mirror the serverless builder,
-    // with a single `/` Monetize tier since the gateway proxies all paths.
+    // The rule statements (raw CFN, PascalCase — including the Monetize action) are
+    // supplied via addPropertyOverride('Rules', ...) so the L1 prop validator passes
+    // them through verbatim (the Monetize action isn't in the typed schema yet). They
+    // mirror the serverless builder, with a single `/` Monetize tier since the gateway
+    // proxies all paths.
     // =====================================================================
     const BOT_NS = 'awswaf:managed:aws:bot-control:bot:';
     const vis = (m) => ({ SampledRequestsEnabled: true, CloudWatchMetricsEnabled: true, MetricName: m });

@@ -23,11 +23,13 @@ dynamically per request (nova-llm per-token, nova-canvas per-image).
   `/generate-text` ×1 (≈$0.002), `/generate-image` ×20 (≈$0.04). Base Sepolia USDC.
 - The seller Lambdas now only produce content; the x402 verify/settle code is removed.
 
-## Parking lot
-`MonetizationConfig` + per-rule `Monetize` are an AWS WAF **preview** capability not yet
-in released CloudFormation/CDK. They are applied via L1 `addPropertyOverride`, so the
-stacks synthesize today and deploy the monetization fields verbatim once support ships.
-**Waiting for final validation once the CFN/SDK are out — currently parking lot.**
+## IaC support status
+AWS WAF AI traffic monetization is **GA** (configurable via the WAF console and API
+today). Its `MonetizationConfig` + per-rule `Monetize` action are **not yet in the
+released CloudFormation/CDK schema** — SDK/CFN support is expected to follow shortly.
+They are applied via L1 `addPropertyOverride`, so the stacks synthesize the full WebACL
+(including the monetization fields) and pass them through CloudFormation verbatim. The
+override is the supported way to set these until the typed CDK/CFN properties land.
 
 ## Pricing-fidelity note
 WAF fixed tiers cannot reproduce true per-token pricing. Text/image tiers are

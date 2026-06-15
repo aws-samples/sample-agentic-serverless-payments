@@ -1,10 +1,12 @@
 /**
  * Native AWS WAF x402 monetization config for the AI-content seller WebACL.
  *
- * PARKING LOT: `MonetizationConfig` + per-rule `Monetize` are an AWS WAF preview
- * capability not yet in released CloudFormation/CDK. These pure builders produce the
- * intended shape; the stack applies them to the L1 CfnWebACL via addPropertyOverride
- * so they pass through verbatim once support ships. Until then they are inert.
+ * NOTE: AWS WAF AI traffic monetization is GA, but `MonetizationConfig` + the per-rule
+ * `Monetize` action are not yet in the released CloudFormation/CDK schema (SDK/CFN
+ * support is expected to follow shortly). These pure builders produce the declarative
+ * shape; the stack applies them to the L1 CfnWebACL via addPropertyOverride so they
+ * pass through CloudFormation verbatim — the supported way to set them until the typed
+ * props land.
  *
  * Pricing maps the repo's dynamic estimator (nova-llm per-token, nova-canvas
  * per-image; estimator.js) onto fixed WAF tiers: base $0.002 USDC × per-route

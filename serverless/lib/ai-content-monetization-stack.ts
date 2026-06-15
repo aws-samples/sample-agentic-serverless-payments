@@ -124,10 +124,11 @@ export class AiContentMonetizationStack extends cdk.Stack {
     // =====================================================================
     // Native WAF x402 monetization in front of the HTTP API seller.
     //
-    // PARKING LOT: MonetizationConfig + per-rule Monetize are an AWS WAF preview
-    // capability not yet in released CloudFormation/CDK. The WebACL synthesizes
-    // today with detection + allow rules; the monetization fields are injected via
-    // L1 addPropertyOverride and deploy verbatim once support ships. See PR.
+    // AWS WAF AI traffic monetization is GA. Its MonetizationConfig + per-rule
+    // Monetize action are not yet in the released CloudFormation/CDK (SDK/CFN
+    // support is expected to follow shortly), so the monetization fields are
+    // injected via L1 addPropertyOverride — the supported escape hatch until the
+    // typed props land. See PR.
     // =====================================================================
     const sellerWallet = process.env.SELLER_WALLET_ADDRESS || '';
     const webAcl = new wafv2.CfnWebACL(this, 'X402WebACL', {
@@ -140,8 +141,9 @@ export class AiContentMonetizationStack extends cdk.Stack {
         metricName: 'ai-content-x402',
       },
       // Rules are supplied via addPropertyOverride below: the builder emits raw
-      // CFN (PascalCase, x402-preview-shaped) statements that the L1 prop
-      // validator would otherwise reject, so they pass through verbatim instead.
+      // CFN (PascalCase, x402-shaped) statements that the L1 prop validator would
+      // otherwise reject (the Monetize action isn't in the typed schema yet), so
+      // they pass through verbatim instead.
       rules: [],
     });
     webAcl.addPropertyOverride('Rules', buildWebAclRules('ai-content'));
