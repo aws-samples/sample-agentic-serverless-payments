@@ -6,8 +6,12 @@ import * as nodejs from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as s3 from 'aws-cdk-lib/aws-s3';
+import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
+import * as origins from 'aws-cdk-lib/aws-cloudfront-origins';
+import * as wafv2 from 'aws-cdk-lib/aws-wafv2';
 import { Construct } from 'constructs';
 import { NagSuppressions } from 'cdk-nag';
+import { buildMonetizationConfig, buildWebAclRules } from './waf-monetization';
 
 export class AiContentMonetizationStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
@@ -49,9 +53,7 @@ export class AiContentMonetizationStack extends cdk.Stack {
         SELLER_WALLET_ADDRESS: process.env.SELLER_WALLET_ADDRESS || '',
         BEDROCK_LAMBDA_NAME: bedrockLambda.functionName,
         ESTIMATOR_LAMBDA_NAME: estimatorLambda.functionName,
-        API_GATEWAY_HTTP_URL: process.env.API_GATEWAY_HTTP_URL || '',
-        CDP_API_KEY_NAME: process.env.CDP_API_KEY_NAME || '',
-        CDP_API_KEY_SECRET: process.env.CDP_API_KEY_SECRET || ''
+        API_GATEWAY_HTTP_URL: process.env.API_GATEWAY_HTTP_URL || ''
       }
     });
 
@@ -100,8 +102,15 @@ export class AiContentMonetizationStack extends cdk.Stack {
       integration: estimatorIntegration
     });
 
+    // Split by content type so WAF can price text vs image by URI prefix.
+    // The seller Lambda still reads `model` from the body; the path only drives pricing.
     httpApi.addRoutes({
-      path: '/generate',
+      path: '/generate-text',
+      methods: [apigatewayv2.HttpMethod.POST],
+      integration: sellerIntegration
+    });
+    httpApi.addRoutes({
+      path: '/generate-image',
       methods: [apigatewayv2.HttpMethod.POST],
       integration: sellerIntegration
     });
@@ -110,6 +119,47 @@ export class AiContentMonetizationStack extends cdk.Stack {
       path: '/health',
       methods: [apigatewayv2.HttpMethod.GET],
       integration: sellerIntegration
+    });
+
+    // =====================================================================
+    // Native WAF x402 monetization in front of the HTTP API seller.
+    //
+    // PARKING LOT: MonetizationConfig + per-rule Monetize are an AWS WAF preview
+    // capability not yet in released CloudFormation/CDK. The WebACL synthesizes
+    // today with detection + allow rules; the monetization fields are injected via
+    // L1 addPropertyOverride and deploy verbatim once support ships. See PR.
+    // =====================================================================
+    const sellerWallet = process.env.SELLER_WALLET_ADDRESS || '';
+    const webAcl = new wafv2.CfnWebACL(this, 'X402WebACL', {
+      name: `ai-content-x402-${this.region}`,
+      scope: 'CLOUDFRONT',
+      defaultAction: { allow: {} },
+      visibilityConfig: {
+        sampledRequestsEnabled: true,
+        cloudWatchMetricsEnabled: true,
+        metricName: 'ai-content-x402',
+      },
+      rules: buildWebAclRules('ai-content') as unknown as wafv2.CfnWebACL.RuleProperty[],
+    });
+    webAcl.addPropertyOverride('MonetizationConfig', buildMonetizationConfig(sellerWallet));
+
+    // CloudFront fronting the HTTP API. The API's default endpoint is the origin.
+    const apiDomain = cdk.Fn.select(2, cdk.Fn.split('/', httpApi.apiEndpoint));
+    const distribution = new cloudfront.Distribution(this, 'X402Distribution', {
+      comment: 'AI content x402 seller (native WAF monetization)',
+      defaultBehavior: {
+        origin: new origins.HttpOrigin(apiDomain),
+        viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+        allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
+        cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
+        originRequestPolicy: cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
+      },
+      webAclId: webAcl.attrArn,
+    });
+
+    new cdk.CfnOutput(this, 'X402DistributionDomain', {
+      value: distribution.distributionDomainName,
+      description: 'CloudFront domain fronting the AI content seller (WAF-gated x402)',
     });
 
     // S3 bucket for images with SSL enforcement
