@@ -139,8 +139,12 @@ export class AiContentMonetizationStack extends cdk.Stack {
         cloudWatchMetricsEnabled: true,
         metricName: 'ai-content-x402',
       },
-      rules: buildWebAclRules('ai-content') as unknown as wafv2.CfnWebACL.RuleProperty[],
+      // Rules are supplied via addPropertyOverride below: the builder emits raw
+      // CFN (PascalCase, x402-preview-shaped) statements that the L1 prop
+      // validator would otherwise reject, so they pass through verbatim instead.
+      rules: [],
     });
+    webAcl.addPropertyOverride('Rules', buildWebAclRules('ai-content'));
     webAcl.addPropertyOverride('MonetizationConfig', buildMonetizationConfig(sellerWallet));
 
     // CloudFront fronting the HTTP API. The API's default endpoint is the origin.
