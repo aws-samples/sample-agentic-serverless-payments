@@ -85,7 +85,7 @@ export class AiContentMonetizationStack extends cdk.Stack {
       corsPreflight: {
         allowOrigins: ['*'],
         allowMethods: [apigatewayv2.CorsHttpMethod.ANY],
-        allowHeaders: ['Content-Type', 'Authorization', 'X-PAYMENT', 'PAYMENT-SIGNATURE']
+        allowHeaders: ['Content-Type', 'Authorization', 'PAYMENT-SIGNATURE']
       }
     });
 

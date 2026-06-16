@@ -4,12 +4,34 @@ import https from 'https';
 
 const app = new Hono();
 
-// x402 Configuration
+// x402 v2 Configuration
+// Use the canonical facilitator host (www.x402.org). The apex x402.org 308-redirects
+// every request to www, so pointing here avoids an extra round-trip per verify/settle.
 const X402_CONFIG = {
-  facilitatorUrl: 'https://x402.org/facilitator',
+  facilitatorUrl: 'https://www.x402.org/facilitator',
   usdcBase: '0x036CbD53842c5426634e7929541eC2318f3dCF7e',
-  network: 'base-sepolia',
+  network: 'eip155:84532', // Base Sepolia in CAIP-2 form (required by x402 v2)
   scheme: 'exact'
+};
+
+const X402_VERSION = 2;
+
+// Build the v2 PaymentRequirements the seller expects for a given authorized amount.
+// `accepted` (sent inside the payment payload to the facilitator) is the same object
+// without the EIP-712 `extra` metadata.
+const buildPaymentRequirements = (amount, resourceUrl) => ({
+  scheme: X402_CONFIG.scheme,
+  network: X402_CONFIG.network,
+  amount: String(amount),
+  asset: X402_CONFIG.usdcBase,
+  payTo: process.env.SELLER_WALLET,
+  maxTimeoutSeconds: 300,
+  extra: { name: 'USDC', version: '2' }
+});
+
+const toAccepted = (paymentRequirements) => {
+  const { extra, ...accepted } = paymentRequirements;
+  return accepted;
 };
 
 // Idempotency cache - for production, persist to DynamoDB for multi-instance scalability
@@ -19,7 +41,7 @@ const processedPayments = new Map();
 app.use('*', async (c, next) => {
   c.header('Access-Control-Allow-Origin', '*');
   c.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  c.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-PAYMENT, PAYMENT-SIGNATURE');
+  c.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, PAYMENT-SIGNATURE');
   c.header('Access-Control-Expose-Headers', 'PAYMENT-REQUIRED, PAYMENT-RESPONSE');
   
   if (c.req.method === 'OPTIONS') {
@@ -56,19 +78,18 @@ const generateCDPJWT = async (requestMethod, requestPath) => {
 };
 */
 
-// Verify payment with x402.org facilitator
+// Verify payment with x402.org facilitator (x402 v2 wire format)
 const verifyPayment = async (paymentPayload, paymentRequirements) => {
   const requestBody = {
-    x402Version: 1,
+    x402Version: X402_VERSION,
     paymentPayload: {
-      x402Version: 1,
-      scheme: X402_CONFIG.scheme,
-      network: X402_CONFIG.network,
+      x402Version: X402_VERSION,
+      accepted: toAccepted(paymentRequirements),
       payload: paymentPayload
     },
     paymentRequirements
   };
-  
+
   console.log('=== VERIFY REQUEST ===');
   const bodyString = JSON.stringify(requestBody);
   
@@ -111,23 +132,22 @@ const verifyPayment = async (paymentPayload, paymentRequirements) => {
       req.end();
     };
     
-    makeRequest('https://x402.org/facilitator/verify');
+    makeRequest(`${X402_CONFIG.facilitatorUrl}/verify`);
   });
 };
 
-// Settle payment with x402.org facilitator
+// Settle payment with x402.org facilitator (x402 v2 wire format)
 const settlePayment = async (paymentPayload, paymentRequirements) => {
   const requestBody = {
-    x402Version: 1,
+    x402Version: X402_VERSION,
     paymentPayload: {
-      x402Version: 1,
-      scheme: X402_CONFIG.scheme,
-      network: X402_CONFIG.network,
+      x402Version: X402_VERSION,
+      accepted: toAccepted(paymentRequirements),
       payload: paymentPayload
     },
     paymentRequirements
   };
-  
+
   console.log('=== SETTLE REQUEST ===');
   const bodyString = JSON.stringify(requestBody);
   
@@ -168,7 +188,7 @@ const settlePayment = async (paymentPayload, paymentRequirements) => {
       req.end();
     };
     
-    makeRequest('https://x402.org/facilitator/settle');
+    makeRequest(`${X402_CONFIG.facilitatorUrl}/settle`);
   });
 };
 
@@ -181,35 +201,27 @@ app.use('/generate_image', async (c, next) => {
     // Use provided price or default estimate (in USDC wei)
     const estimatedCost = price || '20000'; // ~$0.02 default
     
-    // Check for PAYMENT-SIGNATURE header (x402 v2 standard) or X-PAYMENT (legacy)
-    const paymentHeader = c.req.header('PAYMENT-SIGNATURE') || c.req.header('X-PAYMENT');
-    
+    // x402 v2: client sends the signed payment in the PAYMENT-SIGNATURE header.
+    const paymentHeader = c.req.header('PAYMENT-SIGNATURE');
+    const resourceUrl = `${(process.env.GATEWAY_URL || 'https://example.com').replace(/\/$/, '')}/generate_image`;
+
     if (!paymentHeader) {
-      const sellerWallet = process.env.SELLER_WALLET;
-      const paymentRequirements = {
-        scheme: X402_CONFIG.scheme,
-        network: X402_CONFIG.network,
-        maxAmountRequired: String(estimatedCost),
-        resource: `${(process.env.GATEWAY_URL || 'https://example.com').replace(/\/$/, '')}/generate_image`,
-        description: 'AI image generation with Nova Canvas',
-        mimeType: 'application/json',
-        outputSchema: { status: 'string', request_id: 'string', message: 'string' },
-        payTo: sellerWallet,
-        asset: X402_CONFIG.usdcBase,
-        maxTimeoutSeconds: 300,
-        extra: {
-          name: 'USDC',
-          version: '2',
-          chainId: 84532
-        }
-      };
+      const paymentRequirements = buildPaymentRequirements(estimatedCost, resourceUrl);
+      // x402 v2: resource metadata is hoisted to the top level of the 402 body.
       const x402Response = {
-        x402Version: 1,
+        x402Version: X402_VERSION,
         accepts: [paymentRequirements],
+        resource: {
+          url: resourceUrl,
+          description: 'AI image generation with Nova Canvas',
+          mimeType: 'application/json'
+        },
         error: 'Payment required'
       };
       console.log('=== 402 RESPONSE ===');
       console.log(JSON.stringify(x402Response, null, 2));
+      // x402 v2: also surface requirements in the PAYMENT-REQUIRED header (base64 JSON).
+      c.header('PAYMENT-REQUIRED', Buffer.from(JSON.stringify(x402Response)).toString('base64'));
       return c.json(x402Response, 402);
     }
     
@@ -225,45 +237,29 @@ app.use('/generate_image', async (c, next) => {
       return c.json({ error: 'Invalid payment payload' }, 400);
     }
     
-    // Extract authorization (handle both formats)
-    const authorization = paymentPayload.payload?.authorization || paymentPayload.authorization;
+    // x402 v2 payload shape: { x402Version, payload: { signature, authorization }, accepted }
+    const authorization = paymentPayload.payload?.authorization;
     const authorizedValue = authorization?.value;
     if (!authorizedValue) {
       console.log('Missing authorization value');
       return c.json({ error: 'Missing authorization value' }, 400);
     }
-    
+
     // Idempotency check using nonce
     const nonce = authorization?.nonce;
     if (nonce && processedPayments.has(nonce)) {
       return c.json({ error: 'Payment already processed' }, 409);
     }
-    
-    // Create payment requirements using EXACT value from authorization
-    const sellerWallet = process.env.SELLER_WALLET;
-    const paymentRequirements = {
-      scheme: X402_CONFIG.scheme,
-      network: X402_CONFIG.network,
-      maxAmountRequired: authorizedValue,
-      resource: `${(process.env.GATEWAY_URL || 'https://example.com').replace(/\/$/, '')}/generate_image`,
-      description: 'AI image generation with Nova Canvas',
-      mimeType: 'application/json',
-      outputSchema: { status: 'string', request_id: 'string', message: 'string' },
-      payTo: sellerWallet,
-      asset: X402_CONFIG.usdcBase,
-      maxTimeoutSeconds: 300,
-      extra: {
-        name: 'USDC',
-        version: '2',
-        chainId: 84532
-      }
-    };
-    
+
+    // Rebuild payment requirements using the EXACT value from the authorization (do not
+    // trust the client's `accepted` copy — the seller is the source of truth).
+    const paymentRequirements = buildPaymentRequirements(authorizedValue, resourceUrl);
+
     console.log('=== PAYMENT VERIFICATION ===');
     console.log('Payment requirements:', JSON.stringify(paymentRequirements, null, 2));
     console.log('Payment payload from client:', JSON.stringify(paymentPayload, null, 2));
     console.log('Authorization value:', authorizedValue);
-    console.log('Seller wallet:', sellerWallet);
+    console.log('Seller wallet:', process.env.SELLER_WALLET);
     console.log('Asset (USDC):', X402_CONFIG.usdcBase);
     
     // Verify payment with x402.org facilitator (do NOT settle yet - settle after content delivery per x402 spec)

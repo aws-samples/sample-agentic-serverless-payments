@@ -2,7 +2,7 @@
 
 **Authored by:** Chris Wajule and Simon Goldberg
 
-This solution demonstrates pay-per-use AI content generation using the x402 payment protocol. Users pay with USDC on Base Sepolia to access Amazon Nova 2 Lite for text and Amazon Nova Canvas for image generation. Two payment architectures are included: the serverless flow where users sign payments via browser wallets, and the agentic flow using the Strands agent powered by Amazon Bedrock AgentCore with CDP AgentKit, both utilizing the x402.org facilitator to verify signatures and settle payments on-chain via EIP-3009 transferWithAuthorization.
+This solution demonstrates pay-per-use AI content generation using the x402 payment protocol (v2). Users pay with USDC on Base Sepolia to access Amazon Nova 2 Lite for text and Amazon Nova Canvas for image generation. Two payment architectures are included: the serverless flow where users sign payments via browser wallets, and the agentic flow using the Strands agent powered by Amazon Bedrock AgentCore with CDP AgentKit, both utilizing the x402.org facilitator to verify signatures and settle payments on-chain via EIP-3009 transferWithAuthorization.
 
 ## Table of Contents
 
@@ -41,7 +41,7 @@ The numbers in the following flow correspond to the serverless stablecoin paymen
 
 5. **Payment Authorization:** The frontend is hosted on AWS Amplify and displays a payment modal with the cost preview. The user confirms and the application generates an `EIP-712` typed data signature using the connected wallet. The wallet prompts the user to sign the message. The signature authorizes the USDC transfer with validity timestamps and a unique nonce.
 
-6. **Payment Submission:** The frontend retries the `/generate` request with the `EIP-712` signature in the `PAYMENT-SIGNATURE` header. The request includes the authorization object (from, to, value, validAfter, validBefore, nonce) and signature.
+6. **Payment Submission:** The frontend retries the `/generate` request with the `EIP-712` signature in the `PAYMENT-SIGNATURE` header. The Base64-encoded payload uses the x402 v2 shape `{ x402Version: 2, payload: { signature, authorization }, accepted }`, where the authorization object holds (from, to, value, validAfter, validBefore, nonce) and `accepted` echoes the chosen payment requirements.
 
 7. **Payment Verification:** The AWS Lambda function sends the payment payload to the x402.org facilitator's `/verify` endpoint. The facilitator validates the `EIP-712` signature against the USDC contract domain on Base Sepolia.
 
@@ -373,18 +373,32 @@ Agent: 🎉 Success! Your futuristic city at sunset image has been generated suc
 }
 ```
 
-**Response (402 Payment Required):**
+**Response (402 Payment Required):** (x402 v2 wire format)
 
 ```json
 {
-  "scheme": "exact",
-  "network": "base-sepolia",
-  "maxAmountRequired": "192",
-  "payTo": "0x...",
-  "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
-  "description": "AI content generation with nova-llm"
+  "x402Version": 2,
+  "accepts": [
+    {
+      "scheme": "exact",
+      "network": "eip155:84532",
+      "amount": "192",
+      "payTo": "0x...",
+      "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+      "maxTimeoutSeconds": 300,
+      "extra": { "name": "USDC", "version": "2" }
+    }
+  ],
+  "resource": {
+    "url": "https://.../generate",
+    "description": "AI content generation with nova-llm",
+    "mimeType": "application/json"
+  },
+  "error": "Payment required"
 }
 ```
+
+> x402 v2 changes from v1: `x402Version` is `2`, `network` uses the CAIP-2 form (`eip155:84532` for Base Sepolia), the amount field is `amount` (was `maxAmountRequired`), and `resource`/`description`/`mimeType` are hoisted to a top-level `resource` object. The same requirements are also returned Base64-encoded in the `PAYMENT-REQUIRED` response header.
 
 **Response (200 Success):**
 
@@ -544,7 +558,7 @@ rm -rf node_modules/ dist/ serverless/node_modules/ serverless/cdk.out/ serverle
    - Verify transaction hash on [BaseScan Sepolia](https://sepolia.basescan.org)
 
 10. **Gateway Returns 402 After Payment:**
-    - Check that the x402 client is using the correct network (base-sepolia)
+    - Check that the x402 client is using the correct network (CAIP-2 `eip155:84532` for Base Sepolia in x402 v2)
     - Verify the USDC contract address matches
     - Ensure the payment amount matches the required amount
 

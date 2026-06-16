@@ -8,12 +8,35 @@ const https = require('https');
 const app = new Hono();
 const lambdaClient = new LambdaClient({ region: process.env.AWS_REGION });
 
-// x402 Configuration
+// x402 v2 Configuration
+// Use the canonical facilitator host (www.x402.org). The apex x402.org 308-redirects
+// every request to www, so pointing here avoids an extra round-trip per verify/settle.
 const X402_CONFIG = {
-  facilitatorUrl: 'https://x402.org/facilitator',
+  facilitatorHost: 'www.x402.org',
+  facilitatorBasePath: '/facilitator',
   usdcBase: '0x036CbD53842c5426634e7929541eC2318f3dCF7e',
-  network: 'base-sepolia',
+  network: 'eip155:84532', // Base Sepolia in CAIP-2 form (required by x402 v2)
   scheme: 'exact'
+};
+
+const X402_VERSION = 2;
+
+// Build the v2 PaymentRequirements the seller expects for a given authorized amount.
+const buildPaymentRequirements = (amount) => ({
+  scheme: X402_CONFIG.scheme,
+  network: X402_CONFIG.network,
+  amount: String(amount),
+  asset: X402_CONFIG.usdcBase,
+  payTo: process.env.SELLER_WALLET_ADDRESS,
+  maxTimeoutSeconds: 300,
+  extra: { name: 'USDC', version: '2' }
+});
+
+// `accepted` (sent inside the payment payload to the facilitator) mirrors the requirements
+// without the EIP-712 `extra` metadata.
+const toAccepted = (paymentRequirements) => {
+  const { extra, ...accepted } = paymentRequirements;
+  return accepted;
 };
 
 // Idempotency cache - for production, persist to DynamoDB for multi-instance scalability
@@ -23,7 +46,7 @@ const processedPayments = new Map();
 app.use('*', async (c, next) => {
   c.header('Access-Control-Allow-Origin', '*');
   c.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  c.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-PAYMENT, PAYMENT-SIGNATURE');
+  c.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, PAYMENT-SIGNATURE');
   c.header('Access-Control-Expose-Headers', 'PAYMENT-REQUIRED, PAYMENT-RESPONSE');
   
   if (c.req.method === 'OPTIONS') {
@@ -77,29 +100,28 @@ const getEstimateFromLambda = async (content, model) => {
   return body.totalCost;
 };
 
-// Verify payment with x402.org facilitator
+// Verify payment with x402.org facilitator (x402 v2 wire format)
 const verifyPayment = async (paymentPayload, paymentRequirements) => {
   const requestBody = {
-    x402Version: 1,
+    x402Version: X402_VERSION,
     paymentPayload: {
-      x402Version: 1,
-      scheme: X402_CONFIG.scheme,
-      network: X402_CONFIG.network,
+      x402Version: X402_VERSION,
+      accepted: toAccepted(paymentRequirements),
       payload: paymentPayload
     },
     paymentRequirements
   };
-  
+
   console.log('=== VERIFY REQUEST ===');
-  console.log('URL: https://x402.org/facilitator/verify');
-  
+  console.log(`URL: https://${X402_CONFIG.facilitatorHost}${X402_CONFIG.facilitatorBasePath}/verify`);
+
   const bodyString = JSON.stringify(requestBody);
-  
+
   return new Promise((resolve, reject) => {
     const options = {
-      hostname: 'x402.org',
+      hostname: X402_CONFIG.facilitatorHost,
       port: 443,
-      path: '/facilitator/verify',
+      path: `${X402_CONFIG.facilitatorBasePath}/verify`,
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -163,29 +185,28 @@ const verifyPayment = async (paymentPayload, paymentRequirements) => {
   });
 };
 
-// Settle payment with x402.org facilitator
+// Settle payment with x402.org facilitator (x402 v2 wire format)
 const settlePayment = async (paymentPayload, paymentRequirements) => {
   const requestBody = {
-    x402Version: 1,
+    x402Version: X402_VERSION,
     paymentPayload: {
-      x402Version: 1,
-      scheme: X402_CONFIG.scheme,
-      network: X402_CONFIG.network,
+      x402Version: X402_VERSION,
+      accepted: toAccepted(paymentRequirements),
       payload: paymentPayload
     },
     paymentRequirements
   };
-  
+
   console.log('=== SETTLE REQUEST ===');
-  console.log('URL: https://x402.org/facilitator/settle');
-  
+  console.log(`URL: https://${X402_CONFIG.facilitatorHost}${X402_CONFIG.facilitatorBasePath}/settle`);
+
   const bodyString = JSON.stringify(requestBody);
-  
+
   return new Promise((resolve, reject) => {
     const options = {
-      hostname: 'x402.org',
+      hostname: X402_CONFIG.facilitatorHost,
       port: 443,
-      path: '/facilitator/settle',
+      path: `${X402_CONFIG.facilitatorBasePath}/settle`,
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -272,85 +293,64 @@ app.use('/generate', async (c, next) => {
     // Only estimate if price not provided
     const estimatedCost = price || await getEstimateFromLambda(content, model);
     
-    // Check for PAYMENT-SIGNATURE header (x402 v2) or X-PAYMENT (v1 fallback)
+    // x402 v2: client sends the signed payment in the PAYMENT-SIGNATURE header.
     const paymentSignature = c.req.header('PAYMENT-SIGNATURE');
-    const legacyPayment = c.req.header('X-PAYMENT');
-    const paymentHeader = paymentSignature || legacyPayment;
-    
-    if (!paymentHeader) {
-      const publicWallet = process.env.SELLER_WALLET_ADDRESS;
-      const paymentRequirements = {
-        scheme: X402_CONFIG.scheme,
-        network: X402_CONFIG.network,
-        maxAmountRequired: String(estimatedCost),
-        resource: `${process.env.API_GATEWAY_HTTP_URL}/generate`,
-        description: `AI content generation with ${model}`,
-        mimeType: 'application/json',
-        outputSchema: { content: 'string', model: 'string' },
-        payTo: publicWallet,
-        asset: X402_CONFIG.usdcBase,
-        maxTimeoutSeconds: 300
+    const resourceUrl = `${process.env.API_GATEWAY_HTTP_URL}/generate`;
+
+    if (!paymentSignature) {
+      const paymentRequirements = buildPaymentRequirements(estimatedCost);
+      // x402 v2: resource metadata is hoisted to the top level of the 402 body.
+      const x402Response = {
+        x402Version: X402_VERSION,
+        accepts: [paymentRequirements],
+        resource: {
+          url: resourceUrl,
+          description: `AI content generation with ${model}`,
+          mimeType: 'application/json'
+        },
+        error: 'Payment required'
       };
-      console.log('=== 402 RESPONSE PAYMENT REQUIREMENTS ===');
-      console.log(JSON.stringify(paymentRequirements, null, 2));
-      // x402 spec: PAYMENT-REQUIRED header with Base64-encoded requirements
-      c.header('PAYMENT-REQUIRED', Buffer.from(JSON.stringify(paymentRequirements)).toString('base64'));
-      return c.json(paymentRequirements, 402);
+      console.log('=== 402 RESPONSE ===');
+      console.log(JSON.stringify(x402Response, null, 2));
+      // x402 v2: PAYMENT-REQUIRED header with Base64-encoded payment requirements.
+      c.header('PAYMENT-REQUIRED', Buffer.from(JSON.stringify(x402Response)).toString('base64'));
+      return c.json(x402Response, 402);
     }
-    
-    // Parse payment payload (Base64 for PAYMENT-SIGNATURE, JSON for X-PAYMENT)
+
+    // Parse the Base64-encoded v2 PaymentPayload: { x402Version, payload: { signature, authorization }, accepted }
     let paymentPayload;
     try {
-      if (paymentSignature) {
-        paymentPayload = JSON.parse(Buffer.from(paymentSignature, 'base64').toString('utf-8'));
-      } else {
-        paymentPayload = JSON.parse(paymentHeader);
-      }
+      paymentPayload = JSON.parse(Buffer.from(paymentSignature, 'base64').toString('utf-8'));
     } catch (error) {
       return c.json({ error: 'Invalid payment payload' }, 400);
     }
-    
-    // Extract value from authorization to ensure consistency
-    const authorizedValue = paymentPayload.authorization?.value;
+
+    // Extract value from the authorization to ensure consistency
+    const authorization = paymentPayload.payload?.authorization;
+    const authorizedValue = authorization?.value;
     if (!authorizedValue) {
       return c.json({ error: 'Missing authorization value' }, 400);
     }
-    
+
     // Idempotency check using nonce
-    const nonce = paymentPayload.authorization?.nonce;
+    const nonce = authorization?.nonce;
     if (nonce && processedPayments.has(nonce)) {
       return c.json({ error: 'Payment already processed' }, 409);
     }
-    
-    // Create payment requirements using the EXACT value from authorization
-    const publicWallet = process.env.SELLER_WALLET_ADDRESS;
-    const paymentRequirements = {
-      scheme: X402_CONFIG.scheme,
-      network: X402_CONFIG.network,
-      maxAmountRequired: authorizedValue,
-      resource: `${process.env.API_GATEWAY_HTTP_URL}/generate`,
-      description: `AI content generation with ${model}`,
-      mimeType: 'application/json',
-      outputSchema: { content: 'string', model: 'string' },
-      payTo: publicWallet,
-      asset: X402_CONFIG.usdcBase,
-      maxTimeoutSeconds: 300,
-      extra: {
-        name: 'USDC',
-        version: '2',
-        chainId: 84532
-      }
-    };
-    
+
+    // Rebuild payment requirements using the EXACT value from the authorization (the seller
+    // is the source of truth, not the client's `accepted` copy).
+    const paymentRequirements = buildPaymentRequirements(authorizedValue);
+
     console.log('=== PAYMENT VERIFICATION ===');
     console.log('Payment requirements:', JSON.stringify(paymentRequirements, null, 2));
     console.log('Payment payload from client:', JSON.stringify(paymentPayload, null, 2));
     console.log('Authorization value:', authorizedValue);
-    console.log('Public wallet:', publicWallet);
+    console.log('Public wallet:', process.env.SELLER_WALLET_ADDRESS);
     console.log('Asset (USDC):', X402_CONFIG.usdcBase);
-    
+
     // Verify payment with facilitator (do NOT settle yet - settle after content delivery per x402 spec)
-    const verification = await verifyPayment(paymentPayload, paymentRequirements);
+    const verification = await verifyPayment(paymentPayload.payload, paymentRequirements);
     if (!verification.isValid) {
       return c.json({ 
         error: 'Payment verification failed', 
@@ -358,8 +358,8 @@ app.use('/generate', async (c, next) => {
       }, 402);
     }
     
-    // Store payment data for post-delivery settlement
-    c.set('paymentPayload', paymentPayload);
+    // Store the inner payment payload (signature + authorization) for post-delivery settlement
+    c.set('paymentPayload', paymentPayload.payload);
     c.set('paymentRequirements', paymentRequirements);
     c.set('nonce', nonce);
     

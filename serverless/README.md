@@ -84,16 +84,26 @@ The numbers in the following flow correspond to the serverless stablecoin paymen
 }
 ```
 
-**Response (402 Payment Required):**
+**Response (402 Payment Required):** (x402 v2 wire format)
 
 ```json
 {
-  "scheme": "exact",
-  "network": "base-sepolia",
-  "maxAmountRequired": "192",
-  "payTo": "0x...",
-  "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
-  "description": "AI content generation with nova-llm"
+  "x402Version": 2,
+  "accepts": [{
+    "scheme": "exact",
+    "network": "eip155:84532",
+    "amount": "192",
+    "payTo": "0x...",
+    "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+    "maxTimeoutSeconds": 300,
+    "extra": { "name": "USDC", "version": "2" }
+  }],
+  "resource": {
+    "url": "https://.../generate",
+    "description": "AI content generation with nova-llm",
+    "mimeType": "application/json"
+  },
+  "error": "Payment required"
 }
 ```
 

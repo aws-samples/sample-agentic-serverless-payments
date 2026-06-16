@@ -164,14 +164,22 @@ Agent: 🎉 Success! Your futuristic city at sunset image has been generated suc
 
 ```json
 {
-  "x402Version": 1,
+  "x402Version": 2,
   "accepts": [{
     "scheme": "exact",
-    "network": "base-sepolia",
-    "maxAmountRequired": "40000",
+    "network": "eip155:84532",
+    "amount": "40000",
     "payTo": "0x...",
-    "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
-  }]
+    "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+    "maxTimeoutSeconds": 300,
+    "extra": { "name": "USDC", "version": "2" }
+  }],
+  "resource": {
+    "url": "https://.../generate_image",
+    "description": "AI image generation with Nova Canvas",
+    "mimeType": "application/json"
+  },
+  "error": "Payment required"
 }
 ```
 
@@ -241,7 +249,7 @@ cdk diff
    - Review CloudWatch logs for specific error messages
 
 5. **Gateway Returns 402 After Payment:**
-   - Check that the x402 client is using the correct network (base-sepolia)
+   - Check that the x402 client is using the correct network (CAIP-2 `eip155:84532` for Base Sepolia in x402 v2)
    - Verify the USDC contract address matches
    - Ensure the payment amount matches the required amount
 

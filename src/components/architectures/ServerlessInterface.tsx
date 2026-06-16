@@ -91,7 +91,9 @@ export const ServerlessInterface = () => {
         throw new Error(data.error || 'Unexpected response');
       }
       
-      const requirements = await initialResponse.json();
+      // x402 v2: the 402 body is { x402Version, accepts: [...], resource, error }.
+      const body = await initialResponse.json();
+      const requirements = body.accepts?.[0] ?? body;
       setPaymentRequirements(requirements);
       setShowPaymentModal(true);
       setIsLoading(false);
@@ -133,7 +135,7 @@ export const ServerlessInterface = () => {
       const authorization = {
         from: account as `0x${string}`,
         to: paymentRequirements.payTo as `0x${string}`,
-        value: paymentRequirements.maxAmountRequired,
+        value: paymentRequirements.amount,
         validAfter: now.toString(),
         validBefore: (now + 3600).toString(),
         nonce
@@ -176,21 +178,27 @@ export const ServerlessInterface = () => {
       
       setLoadingMessage('Processing payment...');
       
+      // x402 v2 PaymentPayload: { x402Version, payload: { signature, authorization }, accepted }
       const paymentPayload = {
-        signature,
-        authorization: {
-          from: authorization.from,
-          to: authorization.to,
-          value: authorization.value,
-          validAfter: authorization.validAfter,
-          validBefore: authorization.validBefore,
-          nonce: authorization.nonce
+        x402Version: 2,
+        payload: {
+          signature,
+          authorization: {
+            from: authorization.from,
+            to: authorization.to,
+            value: authorization.value,
+            validAfter: authorization.validAfter,
+            validBefore: authorization.validBefore,
+            nonce: authorization.nonce
+          }
         },
-        eip712Domain: {
-          name: domain.name,
-          version: domain.version,
-          chainId: domain.chainId,
-          verifyingContract: domain.verifyingContract
+        accepted: {
+          scheme: paymentRequirements.scheme,
+          network: paymentRequirements.network,
+          amount: authorization.value,
+          asset: paymentRequirements.asset,
+          payTo: paymentRequirements.payTo,
+          maxTimeoutSeconds: paymentRequirements.maxTimeoutSeconds
         }
       };
       
@@ -265,7 +273,7 @@ export const ServerlessInterface = () => {
         onClose={() => setShowPaymentModal(false)}
         onConfirm={handlePaymentConfirm}
         onCancel={handlePaymentCancel}
-        cost={paymentRequirements?.maxAmountRequired || 0}
+        cost={paymentRequirements?.amount || 0}
         model={config.model}
         walletAddress={account || undefined}
       />

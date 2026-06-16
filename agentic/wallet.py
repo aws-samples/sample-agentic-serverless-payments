@@ -8,7 +8,6 @@ from coinbase_agentkit import (
 )
 from web3_provider import get_web3
 from web3 import Web3
-from x402.clients.httpx import x402HttpxClient
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -40,15 +39,18 @@ ERC20_ABI = [
     }
 ]
 
-class _SignedMessageAdapter:
-    """Minimal adapter for x402's expected signed message shape."""
+# Map human-readable network names to CAIP-2 identifiers required by x402 v2.
+_CAIP2_BY_NAME = {
+    'base-sepolia': 'eip155:84532',
+    'base': 'eip155:8453',
+}
 
-    def __init__(self, signature_hex: str):
-        if not isinstance(signature_hex, str):
-            raise ValueError("Expected hex string signature from CDP wallet signer")
 
-        normalized = signature_hex[2:] if signature_hex.startswith("0x") else signature_hex
-        self.signature = bytes.fromhex(normalized)
+def to_caip2(network_id: str) -> str:
+    """Return the CAIP-2 form of a network id (pass through if already CAIP-2)."""
+    if network_id and ':' in network_id:
+        return network_id
+    return _CAIP2_BY_NAME.get(network_id, network_id)
 
 
 def _normalize_typed_data_values(value):
@@ -62,24 +64,26 @@ def _normalize_typed_data_values(value):
     return value
 
 
-class _CdpWalletAccountAdapter:
-    """Adapter so legacy x402 client can sign via CDP without key export."""
+class _CdpWalletSigner:
+    """Implements the x402 v2 ClientEvmSigner protocol, signing via CDP without key export.
+
+    x402 v2 calls sign_typed_data(domain, types, primary_type, message) and expects the
+    raw 65-byte ECDSA signature back (vs the v1 3-arg call returning a .signature object).
+    """
 
     def __init__(self, wallet):
         if not hasattr(wallet, "sign_typed_data"):
             raise ValueError("Wallet does not support sign_typed_data required by x402")
         self._wallet = wallet
-        self.address = wallet.get_address()
+        self._address = wallet.get_address()
 
-    def sign_typed_data(self, domain_data, message_types, message_data):
-        primary_types = [name for name in message_types if name != "EIP712Domain"]
-        if len(primary_types) != 1:
-            raise ValueError(
-                f"Unable to determine EIP-712 primary type from message types: {list(message_types.keys())}"
-            )
+    @property
+    def address(self) -> str:
+        return self._address
 
-        # CDP requires EIP712Domain in types
-        types_with_domain = dict(message_types)
+    def sign_typed_data(self, domain, types, primary_type, message) -> bytes:
+        # CDP requires EIP712Domain to be present in the types map.
+        types_with_domain = dict(types)
         if "EIP712Domain" not in types_with_domain:
             types_with_domain["EIP712Domain"] = [
                 {"name": "name", "type": "string"},
@@ -89,40 +93,40 @@ class _CdpWalletAccountAdapter:
             ]
 
         typed_data = {
-            "domain": domain_data,
+            "domain": domain,
             "types": types_with_domain,
-            "primaryType": primary_types[0],
-            "message": _normalize_typed_data_values(message_data),
+            "primaryType": primary_type,
+            "message": _normalize_typed_data_values(message),
         }
 
-        signature = self._wallet.sign_typed_data(typed_data)
-        return _SignedMessageAdapter(signature)
+        signature_hex = self._wallet.sign_typed_data(typed_data)
+        if not isinstance(signature_hex, str):
+            raise ValueError("Expected hex string signature from CDP wallet signer")
+        normalized = signature_hex[2:] if signature_hex.startswith("0x") else signature_hex
+        return bytes.fromhex(normalized)
 
 
 def get_x402_httpx_client(wallet, base_url: str):
-    """Create x402 HTTP client using CDP-managed signing (no key export)."""
-    from x402.clients.base import x402Client
+    """Create an x402 v2 HTTP client using CDP-managed signing (no key export)."""
+    from x402 import x402Client, prefer_network, prefer_scheme
+    from x402.http.clients import x402HttpxClient
+    from x402.mechanisms.evm.exact import ExactEvmScheme
+
+    network = to_caip2(os.getenv('NETWORK_ID', 'base-sepolia'))
 
     try:
-        account = _CdpWalletAccountAdapter(wallet)
-        logger.info('Using CDP wallet signer for x402 (private key remains in CDP)')
+        signer = _CdpWalletSigner(wallet)
+        logger.info('Using CDP wallet signer for x402 v2 (private key remains in CDP)')
     except Exception as e:
         logger.error(f'Failed to configure CDP wallet signer: {e}')
         raise ValueError(f'Failed to configure CDP wallet signing for x402: {e}') from e
-    
-    def payment_selector(accepts, network_filter=None, scheme_filter=None, max_value=None):
-        return x402Client.default_payment_requirements_selector(
-            accepts,
-            network_filter=os.getenv('NETWORK_ID', 'base-sepolia'),
-            scheme_filter=scheme_filter,
-            max_value=max_value
-        )
-    
-    return x402HttpxClient(
-        account=account,
-        base_url=base_url,
-        payment_requirements_selector=payment_selector
-    )
+
+    client = x402Client()
+    client.register("eip155:*", ExactEvmScheme(signer=signer))
+    client.register_policy(prefer_network(network))
+    client.register_policy(prefer_scheme("exact"))
+
+    return x402HttpxClient(client, base_url=base_url)
 
 _agentkit = None
 
