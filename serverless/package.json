@@ -21,7 +21,7 @@
     "@aws-sdk/client-apigatewaymanagementapi": "^3.400.0",
     "@aws-sdk/lib-dynamodb": "^3.400.0",
     "@aws-sdk/s3-request-presigner": "^3.400.0",
-    "aws-cdk-lib": "^2.100.0",
+    "aws-cdk-lib": "^2.240.0",
     "cdk-nag": "^2.37.55",
     "constructs": "^10.0.0",
     "hono": "^4.11.4"
