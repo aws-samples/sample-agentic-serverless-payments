@@ -10,6 +10,9 @@ const iam = require('aws-cdk-lib/aws-iam');
 const codebuild = require('aws-cdk-lib/aws-codebuild');
 const s3Assets = require('aws-cdk-lib/aws-s3-assets');
 const bedrockagentcore = require('aws-cdk-lib/aws-bedrockagentcore');
+const cloudfront = require('aws-cdk-lib/aws-cloudfront');
+const origins = require('aws-cdk-lib/aws-cloudfront-origins');
+const wafv2 = require('aws-cdk-lib/aws-wafv2');
 const { AwsSolutionsChecks, NagSuppressions } = require('cdk-nag');
 
 class X402GatewayStack extends cdk.Stack {
@@ -53,6 +56,114 @@ class X402GatewayStack extends cdk.Stack {
       methods: [apigatewayv2.HttpMethod.ANY],
       integration: lambdaIntegration
     });
+
+    // =====================================================================
+    // Native WAF x402 monetization in front of the payment gateway HTTP API.
+    // AWS WAF AI traffic monetization is GA; its MonetizationConfig + Monetize action
+    // are not yet in the released CloudFormation/CDK (SDK/CFN support expected to
+    // follow shortly), so they're injected via L1 addPropertyOverride. See PR.
+    //
+    // The rule statements (raw CFN, PascalCase — including the Monetize action) are
+    // supplied via addPropertyOverride('Rules', ...) so the L1 prop validator passes
+    // them through verbatim (the Monetize action isn't in the typed schema yet). They
+    // mirror the serverless builder, with a single `/` Monetize tier since the gateway
+    // proxies all paths.
+    // =====================================================================
+    const BOT_NS = 'awswaf:managed:aws:bot-control:bot:';
+    const vis = (m) => ({ SampledRequestsEnabled: true, CloudWatchMetricsEnabled: true, MetricName: m });
+    const b64 = (s) => Buffer.from(s).toString('base64');
+    const webAcl = new wafv2.CfnWebACL(this, 'X402WebACL', {
+      name: `x402-gateway-${this.region}`,
+      scope: 'CLOUDFRONT',
+      defaultAction: { allow: {} },
+      visibilityConfig: {
+        sampledRequestsEnabled: true,
+        cloudWatchMetricsEnabled: true,
+        metricName: 'x402-gateway',
+      },
+      rules: [],
+    });
+    webAcl.addPropertyOverride('Rules', [
+      {
+        Name: 'AWSBotControl', Priority: 0,
+        OverrideAction: { Count: {} },
+        Statement: { ManagedRuleGroupStatement: {
+          VendorName: 'AWS', Name: 'AWSManagedRulesBotControlRuleSet', Version: 'Version_6.0',
+          ManagedRuleGroupConfigs: [{ AWSManagedRulesBotControlRuleSet: { InspectionLevel: 'COMMON' } }],
+        } },
+        VisibilityConfig: vis('x402-gateway-bot-control'),
+      },
+      {
+        Name: 'human-allow', Priority: 1,
+        Action: { Allow: {} },
+        Statement: { NotStatement: { Statement: { LabelMatchStatement: { Scope: 'NAMESPACE', Key: BOT_NS } } } },
+        VisibilityConfig: vis('x402-gateway-human-allow'),
+      },
+      {
+        Name: 'allow-discovery', Priority: 2,
+        Action: { Allow: {} },
+        Statement: { OrStatement: { Statements: [
+          { ByteMatchStatement: { SearchString: b64('/health'), FieldToMatch: { UriPath: {} }, TextTransformations: [{ Priority: 0, Type: 'NONE' }], PositionalConstraint: 'STARTS_WITH' } },
+          { ByteMatchStatement: { SearchString: b64('/.well-known/'), FieldToMatch: { UriPath: {} }, TextTransformations: [{ Priority: 0, Type: 'NONE' }], PositionalConstraint: 'STARTS_WITH' } },
+        ] } },
+        VisibilityConfig: vis('x402-gateway-allow-discovery'),
+      },
+      {
+        Name: 'Monetize-gateway', Priority: 10,
+        Statement: { ByteMatchStatement: { SearchString: b64('/'), FieldToMatch: { UriPath: {} }, TextTransformations: [{ Priority: 0, Type: 'NONE' }], PositionalConstraint: 'STARTS_WITH' } },
+        Action: { Monetize: { PriceMultiplier: '1' } },
+        VisibilityConfig: vis('x402-gateway-monetize'),
+      },
+    ]);
+    webAcl.addPropertyOverride('MonetizationConfig', {
+      CryptoConfig: { PaymentNetworks: [{
+        Chain: 'BASE_SEPOLIA',
+        WalletAddress: process.env.SELLER_WALLET || '',
+        Prices: [{ Amount: '0.002', Currency: 'USDC' }],
+      }] },
+      CurrencyMode: 'TEST',
+    });
+
+    const apiDomain = cdk.Fn.select(2, cdk.Fn.split('/', httpApi.apiEndpoint));
+    const distribution = new cloudfront.Distribution(this, 'X402Distribution', {
+      comment: 'x402 gateway (native WAF monetization)',
+      defaultBehavior: {
+        origin: new origins.HttpOrigin(apiDomain),
+        viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+        allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
+        cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
+        originRequestPolicy: cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
+      },
+      webAclId: webAcl.attrArn,
+    });
+
+    new cdk.CfnOutput(this, 'X402DistributionDomain', {
+      value: distribution.distributionDomainName,
+      description: 'CloudFront domain fronting the x402 gateway (WAF-gated)',
+    });
+
+    NagSuppressions.addResourceSuppressions(
+      distribution,
+      [
+        {
+          id: 'AwsSolutions-CFR1',
+          reason: 'Geo restriction not required for this demo/PoC x402 gateway.'
+        },
+        {
+          id: 'AwsSolutions-CFR2',
+          reason: 'WAF is attached via the native x402 WebACL (webAclId); cdk-nag cannot always associate the L1 WebACL with the distribution. This is a demo/PoC.'
+        },
+        {
+          id: 'AwsSolutions-CFR3',
+          reason: 'Access logging disabled to simplify deployment. This is a demo/PoC - enable logging for production.'
+        },
+        {
+          id: 'AwsSolutions-CFR4',
+          reason: 'Distribution uses the default CloudFront viewer certificate (no custom domain in this demo/PoC). Use a custom certificate enforcing TLSv1.2 for production.'
+        }
+      ],
+      true
+    );
 
     // ========================================================================
     // AGENTCORE RUNTIME INFRASTRUCTURE
