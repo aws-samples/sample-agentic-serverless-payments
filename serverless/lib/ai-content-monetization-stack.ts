@@ -55,6 +55,39 @@ export class AiContentMonetizationStack extends cdk.Stack {
       }
     });
 
+    // A2A Lambda — Agent-to-Agent x402 payment endpoint
+    const a2aLambda = new nodejs.NodejsFunction(this, 'A2ALambda', {
+      runtime: lambda.Runtime.NODEJS_22_X,
+      entry: 'lambda/a2a/a2a.js',
+      handler: 'handler',
+      timeout: cdk.Duration.minutes(5),
+      memorySize: 512,
+      bundling: {
+        externalModules: ['aws-sdk']
+      },
+      environment: {
+        SELLER_WALLET: process.env.SELLER_WALLET_ADDRESS || '',
+        BEDROCK_LAMBDA_ARN: bedrockLambda.functionArn,
+        GATEWAY_URL: process.env.API_GATEWAY_HTTP_URL || '',
+        NETWORK_ID: process.env.NETWORK_ID || 'base-sepolia',
+        USDC_CONTRACT: process.env.USDC_CONTRACT || '0x036CbD53842c5426634e7929541eC2318f3dCF7e'
+      }
+    });
+
+    // Allow A2A Lambda to invoke Bedrock Lambda
+    a2aLambda.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['lambda:InvokeFunction'],
+      resources: [bedrockLambda.functionArn]
+    }));
+
+    // Allow A2A Lambda to call Bedrock directly
+    a2aLambda.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['bedrock:InvokeModel'],
+      resources: ['*']
+    }));
+
     // Bedrock permissions
     bedrockLambda.addToRolePolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
@@ -92,6 +125,7 @@ export class AiContentMonetizationStack extends cdk.Stack {
     // Lambda integrations
     const estimatorIntegration = new integrations.HttpLambdaIntegration('EstimatorIntegration', estimatorLambda);
     const sellerIntegration = new integrations.HttpLambdaIntegration('SellerIntegration', sellerLambda);
+    const a2aIntegration = new integrations.HttpLambdaIntegration('A2AIntegration', a2aLambda);
 
     // Routes
     httpApi.addRoutes({
@@ -110,6 +144,12 @@ export class AiContentMonetizationStack extends cdk.Stack {
       path: '/health',
       methods: [apigatewayv2.HttpMethod.GET],
       integration: sellerIntegration
+    });
+
+    httpApi.addRoutes({
+      path: '/a2a',
+      methods: [apigatewayv2.HttpMethod.POST],
+      integration: a2aIntegration
     });
 
     // S3 bucket for images with SSL enforcement

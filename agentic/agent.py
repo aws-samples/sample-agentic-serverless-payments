@@ -8,11 +8,13 @@ from tools import estimate_image_cost, check_wallet_balance, make_payment, gener
 from memory_hook import MemoryHook, MEMORY_ID
 import os
 import logging
+from a2a_router import router as a2a_router
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 
 app = FastAPI(title="Content Monetization Agent", version="1.0.0")
+app.include_router(a2a_router)
 
 model = BedrockModel(
     model_id="us.anthropic.claude-sonnet-4-20250514-v1:0",
