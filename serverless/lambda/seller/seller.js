@@ -1,6 +1,7 @@
 const { Hono } = require('hono');
 const { handle } = require('hono/aws-lambda');
 const { LambdaClient, InvokeCommand } = require('@aws-sdk/client-lambda');
+const { DynamoDBClient, PutItemCommand, GetItemCommand, UpdateItemCommand } = require('@aws-sdk/client-dynamodb');
 //const { generateJwt } = require('@coinbase/cdp-sdk/auth');
 const https = require('https');
 
@@ -16,8 +17,69 @@ const X402_CONFIG = {
   scheme: 'exact'
 };
 
-// Idempotency cache - for production, persist to DynamoDB for multi-instance scalability
-const processedPayments = new Map();
+// DynamoDB-backed nonce store — shared across all Lambda instances so replay
+// protection holds even when the function scales horizontally.
+// Falls back to an in-process Map when the env var is absent (local dev / tests).
+const dynamodb = process.env.NONCE_TABLE_NAME
+  ? new DynamoDBClient({ region: process.env.AWS_REGION || 'us-east-1' })
+  : null;
+
+const localNonceCache = new Map();
+
+const MAX_PAYMENT_AGE_SEC = 300;
+
+async function markNoncePending(nonce, paymentPayload, paymentRequirements) {
+  const ttl = Math.floor(Date.now() / 1000) + 3600;
+  if (dynamodb) {
+    await dynamodb.send(new PutItemCommand({
+      TableName: process.env.NONCE_TABLE_NAME,
+      Item: {
+        nonce: { S: nonce },
+        status: { S: 'pending' },
+        paymentPayload: { S: JSON.stringify(paymentPayload) },
+        paymentRequirements: { S: JSON.stringify(paymentRequirements) },
+        createdAt: { N: String(Math.floor(Date.now() / 1000)) },
+        ttl: { N: String(ttl) },
+      },
+      ConditionExpression: 'attribute_not_exists(nonce)',
+    }));
+  } else {
+    if (localNonceCache.has(nonce)) throw new Error('Duplicate nonce');
+    localNonceCache.set(nonce, { status: 'pending', paymentPayload, paymentRequirements, ts: Date.now() });
+  }
+}
+
+async function getNonceEntry(nonce) {
+  if (dynamodb) {
+    const res = await dynamodb.send(new GetItemCommand({
+      TableName: process.env.NONCE_TABLE_NAME,
+      Key: { nonce: { S: nonce } },
+    }));
+    if (!res.Item) return null;
+    return {
+      status: res.Item.status.S,
+      paymentPayload: JSON.parse(res.Item.paymentPayload.S),
+      paymentRequirements: JSON.parse(res.Item.paymentRequirements.S),
+    };
+  } else {
+    return localNonceCache.get(nonce) || null;
+  }
+}
+
+async function markNonceSettled(nonce) {
+  if (dynamodb) {
+    await dynamodb.send(new UpdateItemCommand({
+      TableName: process.env.NONCE_TABLE_NAME,
+      Key: { nonce: { S: nonce } },
+      UpdateExpression: 'SET #s = :settled',
+      ExpressionAttributeNames: { '#s': 'status' },
+      ExpressionAttributeValues: { ':settled': { S: 'settled' } },
+    }));
+  } else {
+    const entry = localNonceCache.get(nonce);
+    if (entry) entry.status = 'settled';
+  }
+}
 
 // Add CORS middleware
 app.use('*', async (c, next) => {
@@ -315,13 +377,25 @@ app.use('/generate', async (c, next) => {
     if (!authorizedValue) {
       return c.json({ error: 'Missing authorization value' }, 400);
     }
-    
-    // Idempotency check using nonce
-    const nonce = paymentPayload.authorization?.nonce;
-    if (nonce && processedPayments.has(nonce)) {
-      return c.json({ error: 'Payment already processed' }, 409);
+
+    // Reject expired or stale signatures
+    const validBefore = Number(paymentPayload.authorization?.validBefore || 0);
+    const nowSec = Math.floor(Date.now() / 1000);
+    if (validBefore > 0 && nowSec > validBefore) {
+      return c.json({ error: 'payment_expired', reason: 'Payment signature has expired' }, 402);
     }
-    
+    const validAfter = Number(paymentPayload.authorization?.validAfter || 0);
+    if ((nowSec - validAfter) > MAX_PAYMENT_AGE_SEC) {
+      return c.json({ error: 'payment_expired', reason: `Signature older than ${MAX_PAYMENT_AGE_SEC} seconds` }, 402);
+    }
+
+    // Idempotency check — DynamoDB-backed across Lambda instances
+    const nonce = paymentPayload.authorization?.nonce;
+    if (nonce) {
+      const existing = await getNonceEntry(nonce);
+      if (existing) return c.json({ error: 'Payment already processed' }, 409);
+    }
+
     // Create payment requirements using the EXACT value from authorization
     const publicWallet = process.env.SELLER_WALLET_ADDRESS;
     const paymentRequirements = {
@@ -352,17 +426,27 @@ app.use('/generate', async (c, next) => {
     // Verify payment with facilitator (do NOT settle yet - settle after content delivery per x402 spec)
     const verification = await verifyPayment(paymentPayload, paymentRequirements);
     if (!verification.isValid) {
-      return c.json({ 
-        error: 'Payment verification failed', 
-        reason: verification.invalidReason 
+      return c.json({
+        error: 'Payment verification failed',
+        reason: verification.invalidReason
       }, 402);
     }
-    
+
+    // Persist nonce atomically — ConditionalCheckFailedException means concurrent replay
+    if (nonce) {
+      try {
+        await markNoncePending(nonce, paymentPayload, paymentRequirements);
+      } catch (err) {
+        if (err.name === 'ConditionalCheckFailedException') return c.json({ error: 'Payment already processed' }, 409);
+        throw err;
+      }
+    }
+
     // Store payment data for post-delivery settlement
     c.set('paymentPayload', paymentPayload);
     c.set('paymentRequirements', paymentRequirements);
     c.set('nonce', nonce);
-    
+
     await next();
   } catch (error) {
     console.error('Payment middleware error:', error);
@@ -391,16 +475,12 @@ app.post('/generate', async (c) => {
       console.warn('Settlement failed after content delivery:', settlement.errorReason);
     }
     
-    // Mark transaction as processed using nonce
+    // Mark nonce as settled in DynamoDB so it cannot be replayed
     if (nonce) {
-      processedPayments.set(nonce, Date.now());
-      const oneHourAgo = Date.now() - 3600000;
-      for (const [n, timestamp] of processedPayments.entries()) {
-        if (timestamp < oneHourAgo) processedPayments.delete(n);
-      }
+      await markNonceSettled(nonce);
     }
-    
-    const response = { 
+
+    const response = {
       message: "Payment verified - content generated successfully",
       status: "success",
       content: bedrockResponse.content || 'No content generated',

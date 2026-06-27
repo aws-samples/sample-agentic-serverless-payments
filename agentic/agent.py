@@ -4,13 +4,33 @@ from typing import Dict, Any, Optional
 from datetime import datetime, timezone
 from strands import Agent
 from strands.models import BedrockModel
-from tools import estimate_image_cost, check_wallet_balance, make_payment, generate_image, analyze_content_monetization, IMAGE_STORAGE
+from tools import estimate_image_cost, check_wallet_balance, make_payment, generate_image, analyze_content_monetization, get_session_storage
 from memory_hook import MemoryHook, MEMORY_ID
 import os
 import logging
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+
+def validate_config():
+    """Fail fast if required environment variables are missing or invalid."""
+    required = ['GATEWAY_URL', 'SELLER_WALLET', 'CDP_API_KEY_ID', 'CDP_API_KEY_SECRET']
+    missing = [k for k in required if not os.getenv(k)]
+    if missing:
+        raise RuntimeError(f"Missing required environment variables: {', '.join(missing)}")
+
+    from web3_provider import get_web3
+    try:
+        w3 = get_web3()
+        if not w3.is_connected():
+            raise RuntimeError("RPC endpoint unreachable — check WEB3_PROVIDER_URL")
+    except Exception as e:
+        raise RuntimeError(f"Web3 connectivity check failed: {e}") from e
+
+
+validate_config()
 
 app = FastAPI(title="Content Monetization Agent", version="1.0.0")
 
@@ -54,35 +74,29 @@ class InvocationResponse(BaseModel):
 
 @app.post("/invocations", response_model=InvocationResponse)
 async def invoke_agent(request: InvocationRequest):
-    import logging
-    logger = logging.getLogger(__name__)
-    
     try:
         logger.info(f"📥 [REQUEST] Session:{request.session_id} | Prompt:{request.input.get('prompt', '')[:100]}")
-        
+
         user_message = request.input.get("prompt", "")
         if not user_message:
             raise HTTPException(
                 status_code=400,
                 detail="No prompt found in input. Please provide a 'prompt' key."
             )
-        
+
         # Set session ID for memory isolation
         session_id = request.session_id or request.input.get("session_id", "default")
         agent.state.session_id = session_id
-        
+
         logger.info(f"🤖 [AGENT_START] Session:{session_id} | Message:{user_message[:100]}")
         result = agent(user_message)
         logger.info(f"💬 [AGENT_RESPONSE] Session:{session_id} | Response:{str(result.message)[:300]}...")
-        
-        # Extract images from global storage (images are returned to user)
-        images = {}
-        for image_id, image_data in IMAGE_STORAGE.items():
-            images[image_id] = image_data
-        
-        # Clear storage after extraction
-        IMAGE_STORAGE.clear()
-        
+
+        # Extract images from session-scoped storage to prevent cross-session leakage
+        storage = get_session_storage(session_id)
+        images = dict(storage.image_storage)
+        storage.image_storage.clear()
+
         response = {
             "message": result.message,
             "timestamp": datetime.now(timezone.utc).isoformat(),
