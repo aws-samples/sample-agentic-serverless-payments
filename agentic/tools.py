@@ -13,6 +13,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+SESSION_SPEND_CAP_USD = float(os.getenv('SESSION_SPEND_CAP_USD', '1.0'))
+
 bedrock_runtime = boto3.client('bedrock-runtime', region_name=os.getenv('AWS_REGION', 'us-east-1'))
 
 # Session-level storage - will be managed per session
@@ -25,6 +27,7 @@ class SessionStorage:
         self.auth_verified = set()
         self.current_request_id = None  # Track current request_id
         self.current_cost = None        # Track current cost
+        self.total_spent_usd = 0.0
 
 # Global fallback for backward compatibility
 IMAGE_STORAGE = {}
@@ -127,6 +130,15 @@ def make_payment(request_id: str = None, session_id: str = "default") -> str:
     if balance_info['usdc_balance'] < amount_usdc:
         return f"Error: Insufficient balance. Need {amount_usdc:.6f} USDC, have {balance_info['usdc_balance']:.6f} USDC"
     
+    projected_spend = storage.total_spent_usd + amount_usdc
+    if projected_spend > SESSION_SPEND_CAP_USD:
+        remaining = max(0.0, SESSION_SPEND_CAP_USD - storage.total_spent_usd)
+        return (
+            f"Error: Session spend cap of ${SESSION_SPEND_CAP_USD:.2f} USDC would be exceeded. "
+            f"Spent so far: ${storage.total_spent_usd:.4f}, this request: ${amount_usdc:.4f}, "
+            f"remaining allowance: ${remaining:.4f}. Start a new session to reset the cap."
+        )
+
     storage.authorize_check[request_id]['auth'] = True
     storage.auth_verified.add(request_id)
     # Update global for backward compatibility
@@ -257,8 +269,9 @@ def generate_image(request_id: str = None, session_id: str = "default") -> str:
     
     # Store image_id for potential analysis
     storage.authorize_check[request_id]['image_id'] = image_id
+    storage.total_spent_usd += cost_usdc
     AUTHORIZE_CHECK[request_id] = storage.authorize_check[request_id]
-    
+
     # Clear current request_id after successful completion to allow new requests
     storage.current_request_id = None
     storage.current_cost = None
