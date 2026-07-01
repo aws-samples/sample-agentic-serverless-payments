@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Agent Market — x402 Storefront</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0a0a0f; color: #e4e4e7; line-height: 1.6; }
+    header { border-bottom: 1px solid #1f1f29; padding: 1.5rem 2rem; display: flex; align-items: center; justify-content: space-between; }
+    .brand { display: flex; align-items: center; gap: .6rem; }
+    .brand .logo { width: 30px; height: 30px; border-radius: 8px; background: linear-gradient(135deg, #7c3aed, #22c55e); }
+    .brand h1 { font-size: 1.1rem; font-weight: 700; color: #fafafa; }
+    .badge { background: #7c3aed22; color: #a78bfa; border: 1px solid #7c3aed44; border-radius: 999px; padding: .3rem .8rem; font-size: .72rem; font-weight: 600; }
+    main { max-width: 1100px; margin: 0 auto; padding: 2rem; }
+    .hero { text-align: center; padding: 2rem 0 2.5rem; }
+    .hero h2 { font-size: 1.6rem; font-weight: 700; color: #fafafa; margin-bottom: .5rem; }
+    .hero p { font-size: .9rem; color: #a1a1aa; max-width: 560px; margin: 0 auto; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 1.25rem; }
+    .card { background: #131318; border: 1px solid #27272a; border-radius: 14px; overflow: hidden; display: flex; flex-direction: column; }
+    .card .img { aspect-ratio: 16/10; background: #0f0f14; display: flex; align-items: center; justify-content: center; position: relative; }
+    .card .img img { width: 100%; height: 100%; object-fit: cover; }
+    .badge { position: absolute; top: .55rem; right: .55rem; font-size: .62rem; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; padding: .25rem .5rem; border-radius: 999px; backdrop-filter: blur(4px); }
+    .badge.digital { background: rgba(124,58,237,.25); color: #c4b5fd; border: 1px solid rgba(124,58,237,.5); }
+    .badge.physical { background: rgba(6,182,212,.22); color: #a5f3fc; border: 1px solid rgba(6,182,212,.5); }
+    .card .body { padding: 1rem 1.1rem 1.2rem; display: flex; flex-direction: column; gap: .4rem; flex: 1; }
+    .card .cat { font-size: .68rem; color: #71717a; text-transform: uppercase; letter-spacing: .04em; }
+    .card .name { font-size: .95rem; font-weight: 600; color: #fafafa; }
+    .card .desc { font-size: .8rem; color: #a1a1aa; flex: 1; }
+    .card .row { display: flex; align-items: center; justify-content: space-between; margin-top: .6rem; }
+    .card .price { font-size: 1rem; font-weight: 700; color: #a78bfa; }
+    .card .stock { font-size: .7rem; color: #52525b; }
+    .buy { width: 100%; margin-top: .8rem; padding: .6rem; border: 1px solid #27272a; border-radius: 9px; background: #1a1a22; color: #52525b; font-size: .82rem; font-weight: 600; cursor: not-allowed; position: relative; }
+    .buy .tip { display: none; position: absolute; bottom: 115%; left: 50%; transform: translateX(-50%); white-space: nowrap; background: #18181b; border: 1px solid #3f3f46; color: #d4d4d8; font-size: .7rem; font-weight: 500; padding: .4rem .6rem; border-radius: 6px; }
+    .buy:hover .tip { display: block; }
+    footer { text-align: center; font-size: .72rem; color: #52525b; padding: 2.5rem 2rem; border-top: 1px solid #1f1f29; margin-top: 2rem; }
+    footer a { color: #7c3aed; text-decoration: none; }
+    .loading, .error { text-align: center; color: #71717a; padding: 3rem; font-size: .9rem; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <div class="logo"></div>
+      <h1>Agent Market</h1>
+    </div>
+    <span class="badge">x402 · Agent-only checkout</span>
+  </header>
+
+  <main>
+    <div class="hero">
+      <h2>An economy built for agents</h2>
+      <p>Browse the catalog below. Checkout is reserved for AI agents paying via the x402 protocol and Amazon Bedrock AgentCore Payments — a valid stablecoin payment is the only authorization needed.</p>
+    </div>
+    <div id="catalog" class="grid"><div class="loading">Loading catalog…</div></div>
+  </main>
+
+  <footer>
+    Powered by <a href="https://aws.amazon.com/bedrock/agentcore/" target="_blank" rel="noopener noreferrer">Amazon Bedrock AgentCore Payments</a> ·
+    <a href="https://docs.cdp.coinbase.com/x402/welcome" target="_blank" rel="noopener noreferrer">x402 protocol</a> · testnet USDC
+  </footer>
+
+  <script src="config.js"></script>
+  <script>
+    // config.js sets window.STOREFRONT_API_URL (injected at deploy time).
+    const API = (window.STOREFRONT_API_URL || "").replace(/\/+$/, "");
+
+    function money(n) { return "$" + Number(n).toFixed(2); }
+
+    // Return a safe src for an <img>. Blocks script-bearing schemes
+    // (javascript:, data:, vbscript:) that could execute if an attacker
+    // controlled the catalog, while allowing relative paths (the catalog
+    // stores relative image keys) and http(s) URLs.
+    function safeSrc(url) {
+      const s = String(url == null ? "" : url).trim();
+      if (/^(javascript|data|vbscript):/i.test(s)) return "";
+      return s;
+    }
+
+    // Small helper: create an element with a class and text content. Using
+    // textContent (never innerHTML) means catalog values are always treated as
+    // text, so product data can never inject markup or script.
+    function elem(tag, className, text) {
+      const node = document.createElement(tag);
+      if (className) node.className = className;
+      if (text != null) node.textContent = String(text);
+      return node;
+    }
+
+    // Build a product card entirely from DOM nodes (no HTML string parsing).
+    function card(p) {
+      const stock = p.inventory > 0 ? `${p.inventory} in stock` : "Out of stock";
+      const isPhysical = p.fulfillmentType === "physical";
+
+      const cardEl = elem("div", "card");
+
+      const imgWrap = elem("div", "img");
+      imgWrap.appendChild(elem("span", isPhysical ? "badge physical" : "badge digital", isPhysical ? "Physical" : "Digital"));
+      const img = document.createElement("img");
+      img.setAttribute("src", safeSrc(p.imageUrl));
+      img.setAttribute("alt", String(p.name == null ? "" : p.name));
+      img.setAttribute("loading", "lazy");
+      img.addEventListener("error", function () { this.style.display = "none"; });
+      imgWrap.appendChild(img);
+      cardEl.appendChild(imgWrap);
+
+      const body = elem("div", "body");
+      body.appendChild(elem("span", "cat", p.category || "General"));
+      body.appendChild(elem("span", "name", p.name));
+      body.appendChild(elem("span", "desc", p.description || ""));
+
+      const row = elem("div", "row");
+      row.appendChild(elem("span", "price", money(p.priceUsd) + " USDC"));
+      row.appendChild(elem("span", "stock", stock));
+      body.appendChild(row);
+
+      const btn = elem("button", "buy");
+      btn.disabled = true;
+      btn.appendChild(document.createTextNode("Agents only"));
+      btn.appendChild(elem("span", "tip", "Ask the AI assistant to buy this"));
+      body.appendChild(btn);
+
+      cardEl.appendChild(body);
+      return cardEl;
+    }
+
+    async function load() {
+      const el = document.getElementById("catalog");
+      // Error messages use textContent (never innerHTML) so a fetch/runtime
+      // error string can never inject markup.
+      const showError = (msg) => {
+        const d = document.createElement("div");
+        d.className = "error";
+        d.textContent = msg;
+        el.replaceChildren(d);
+      };
+      if (!API) { showError("Storefront API not configured."); return; }
+      try {
+        const r = await fetch(`${API}/products`);
+        const data = await r.json();
+        const products = data.products || [];
+        if (!products.length) { showError("No products available."); return; }
+        // Render via DOM construction (createElement/textContent) rather than
+        // innerHTML, so catalog values are never parsed as markup.
+        el.replaceChildren(...products.map(card));
+      } catch (e) {
+        showError("Failed to load catalog: " + ((e && e.message) || "unknown error"));
+      }
+    }
+    load();
+  </script>
+</body>
+</html>

@@ -1,0 +1,22 @@
+{
+  "name": "x402-storefront-seller",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Agent-economy storefront — x402 order service, products, seller setup, and seller-originated refunds",
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "3.1060.0",
+    "@aws-sdk/lib-dynamodb": "3.1060.0",
+    "@aws-sdk/client-bedrock-agentcore": "3.1060.0",
+    "@aws-sdk/client-bedrock-agentcore-control": "3.1060.0",
+    "@aws-sdk/client-s3": "3.1061.0",
+    "@aws-sdk/s3-request-presigner": "3.1061.0",
+    "@aws-sdk/client-ses": "3.1061.0",
+    "@x402/core": "2.14.0",
+    "@x402/evm": "2.14.0",
+    "@x402/svm": "2.14.0"
+  },
+  "//overrides": "ws pinned to 8.21.0: patches the ws memory-exhaustion DoS (advisory GHSA-3h5v-q93c-6h6q) pulled transitively via viem/@x402.",
+  "overrides": {
+    "ws": "8.21.0"
+  }
+}

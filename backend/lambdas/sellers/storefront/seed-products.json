@@ -1,0 +1,76 @@
+[
+  {
+    "productId": "ebook-agentic-commerce",
+    "name": "eBook: Agentic Commerce",
+    "description": "A concise guide to building agent-economy payment flows. DRM-free, downloadable.",
+    "priceUsd": 4.99,
+    "inventory": 5000,
+    "imageFile": "ebook-agentic-commerce.svg",
+    "category": "Content",
+    "fulfillmentType": "digital",
+    "deliveryKind": "file",
+    "assetKey": "deliverables/ebook-agentic-commerce.md",
+    "active": true
+  },
+  {
+    "productId": "stock-photo-pack",
+    "name": "Stock Photo Pack",
+    "description": "A royalty-free media pack for marketing and product mockups. Delivered as a downloadable file.",
+    "priceUsd": 7.99,
+    "inventory": 800,
+    "imageFile": "stock-photo-pack.svg",
+    "category": "Media",
+    "fulfillmentType": "digital",
+    "deliveryKind": "file",
+    "assetKey": "deliverables/stock-photo-pack.md",
+    "active": true
+  },
+  {
+    "productId": "dataset-license",
+    "name": "Dataset License",
+    "description": "Single-use license to a curated reference dataset. Delivered as a signed redeem token.",
+    "priceUsd": 9.99,
+    "inventory": 500,
+    "imageFile": "dataset-license.svg",
+    "category": "Data",
+    "fulfillmentType": "digital",
+    "deliveryKind": "license",
+    "active": true
+  },
+  {
+    "productId": "sticker-pack",
+    "name": "Sticker Pack",
+    "description": "A physical set of vinyl stickers shipped to your address. Ships in 3 to 5 business days.",
+    "priceUsd": 2.99,
+    "inventory": 400,
+    "imageFile": "sticker-pack.svg",
+    "category": "Merch",
+    "fulfillmentType": "physical",
+    "requiresShipping": true,
+    "active": true
+  },
+  {
+    "productId": "quickstart-booklet",
+    "name": "Printed Quickstart Booklet",
+    "description": "A printed quickstart booklet mailed to your address. Ships in 3 to 5 business days.",
+    "priceUsd": 5.99,
+    "inventory": 250,
+    "imageFile": "quickstart-booklet.svg",
+    "category": "Merch",
+    "fulfillmentType": "physical",
+    "requiresShipping": true,
+    "active": true
+  },
+  {
+    "productId": "dev-kit",
+    "name": "Developer Kit",
+    "description": "A physical developer kit bundle shipped to your address. Ships in 5 to 7 business days.",
+    "priceUsd": 12.99,
+    "inventory": 120,
+    "imageFile": "dev-kit.svg",
+    "category": "Hardware",
+    "fulfillmentType": "physical",
+    "requiresShipping": true,
+    "active": true
+  }
+]

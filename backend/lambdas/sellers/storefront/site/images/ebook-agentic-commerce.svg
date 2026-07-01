@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 200" width="320" height="200" role="img" aria-label="eBook Agentic Commerce">
+  <defs>
+    <linearGradient id="g5" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#06b6d4"/><stop offset="1" stop-color="#0a0a0f"/>
+    </linearGradient>
+  </defs>
+  <rect width="320" height="200" fill="url(#g5)"/>
+  <g fill="none" stroke="#a5f3fc" stroke-width="2.5" opacity="0.9">
+    <path d="M160 60 c-20 -10 -45 -10 -55 0 v75 c10 -10 35 -10 55 0"/>
+    <path d="M160 60 c20 -10 45 -10 55 0 v75 c-10 -10 -35 -10 -55 0"/>
+    <line x1="160" y1="60" x2="160" y2="135"/>
+  </g>
+  <text x="160" y="180" font-family="monospace" font-size="16" fill="#cffafe" text-anchor="middle" font-weight="700">eBOOK</text>
+</svg>

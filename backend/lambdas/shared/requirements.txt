@@ -1,0 +1,8 @@
+# Shared Lambda layer dependencies.
+# The Lambda Python runtime bundles an older boto3 that predates the
+# AgentCore Payments APIs, so we pin a GA-capable boto3/botocore here.
+# CreatePaymentManager / ListPaymentManagers / CreatePaymentInstrument /
+# ProcessPayment and the rest ship in boto3 >= 1.43.
+# Pinned to exact tested versions for reproducible builds; bump deliberately.
+boto3==1.43.37
+botocore==1.43.37
