@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 200" width="320" height="200" role="img" aria-label="Stock Photo Pack">
+  <defs>
+    <linearGradient id="g6" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#8b5cf6"/><stop offset="1" stop-color="#0a0a0f"/>
+    </linearGradient>
+  </defs>
+  <rect width="320" height="200" fill="url(#g6)"/>
+  <g fill="none" stroke="#ddd6fe" stroke-width="2.5" opacity="0.9">
+    <rect x="115" y="60" width="90" height="70" rx="6"/>
+    <circle cx="138" cy="82" r="8"/>
+    <path d="M118 122 l25 -25 l18 18 l22 -28 l22 35"/>
+  </g>
+  <text x="160" y="170" font-family="monospace" font-size="15" fill="#ede9fe" text-anchor="middle" font-weight="700">PHOTOS</text>
+</svg>

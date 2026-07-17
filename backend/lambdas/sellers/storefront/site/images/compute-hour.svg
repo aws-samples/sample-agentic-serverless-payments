@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 200" width="320" height="200" role="img" aria-label="Compute Hour">
+  <defs>
+    <linearGradient id="g3" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f59e0b"/><stop offset="1" stop-color="#0a0a0f"/>
+    </linearGradient>
+  </defs>
+  <rect width="320" height="200" fill="url(#g3)"/>
+  <g fill="none" stroke="#fde68a" stroke-width="2.5" opacity="0.9">
+    <rect x="120" y="60" width="80" height="80" rx="8"/>
+    <line x1="135" y1="48" x2="135" y2="60"/><line x1="160" y1="48" x2="160" y2="60"/><line x1="185" y1="48" x2="185" y2="60"/>
+    <line x1="135" y1="140" x2="135" y2="152"/><line x1="160" y1="140" x2="160" y2="152"/><line x1="185" y1="140" x2="185" y2="152"/>
+    <line x1="108" y1="80" x2="120" y2="80"/><line x1="108" y1="100" x2="120" y2="100"/><line x1="108" y1="120" x2="120" y2="120"/>
+    <line x1="200" y1="80" x2="212" y2="80"/><line x1="200" y1="100" x2="212" y2="100"/><line x1="200" y1="120" x2="212" y2="120"/>
+  </g>
+  <text x="160" y="186" font-family="monospace" font-size="15" fill="#fef3c7" text-anchor="middle" font-weight="700">COMPUTE</text>
+</svg>

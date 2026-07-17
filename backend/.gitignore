@@ -1,0 +1,12 @@
+# TypeScript compilation output (lib/ and bin/ only)
+lib/*.js
+lib/*.d.ts
+bin/*.js
+bin/*.d.ts
+
+node_modules
+.env
+
+# CDK asset staging directory
+.cdk.staging
+cdk.out

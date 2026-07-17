@@ -1,0 +1,20 @@
+{
+  "name": "x402-seller-image-gen",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "x402 seller — AI image generation via Nova Canvas",
+  "dependencies": {
+    "@x402/hono": "2.8.0",
+    "@x402/core": "2.7.0",
+    "@x402/evm": "2.7.0",
+    "@x402/svm": "2.8.0",
+    "hono": "4.12.27",
+    "@aws-sdk/client-bedrock-runtime": "3.1011.0",
+    "@aws-sdk/client-dynamodb": "3.1069.0",
+    "@aws-sdk/lib-dynamodb": "3.1069.0"
+  },
+  "//overrides": "ws pinned to 8.21.0: patches the ws memory-exhaustion DoS (advisory GHSA-3h5v-q93c-6h6q) pulled transitively via viem/@x402.",
+  "overrides": {
+    "ws": "8.21.0"
+  }
+}
