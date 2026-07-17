@@ -14,6 +14,16 @@ import type { Vendor } from '@/types'
 
 type SetupStep = 'idle' | 'running' | 'done' | 'error'
 
+// The deployed frontend signer ID. The Connect Agent flow delegates user
+// wallets to this authorization key, so a StripePrivy credential provider must
+// be created with the SAME key (its Authorization Key ID must equal this) or
+// the agent signs with a key the wallet never authorized and ProcessPayment
+// fails. Used below to warn admins on a mismatch before Quick Setup runs.
+const PRIVY_SIGNER_ID = import.meta.env.VITE_PRIVY_SIGNER_ID as string | undefined
+const PRIVY_APP_ID = import.meta.env.VITE_PRIVY_APP_ID as string | undefined
+
+const normalizeKeyId = (value: string) => value.trim().replace(/^wallet-auth:/, '')
+
 function QuickSetup() {
   const {
     credentialProviders, paymentManagers, paymentConnectors,
@@ -47,6 +57,22 @@ function QuickSetup() {
   const [running, setRunning] = useState(false)
 
   const allExist = credentialProviders.length > 0 && paymentManagers.length > 0 && paymentConnectors.length > 0
+
+  // Block when a StripePrivy provider's App ID or Authorization Key ID does not
+  // match the deployed VITE_PRIVY_APP_ID / VITE_PRIVY_SIGNER_ID the Connect
+  // Agent flow uses — either mismatch means ProcessPayment can never succeed.
+  // Each check only fires when its frontend value is configured.
+  const appIdMismatch =
+    vendor === 'StripePrivy' &&
+    !!PRIVY_APP_ID &&
+    !!appId.trim() &&
+    appId.trim() !== PRIVY_APP_ID.trim()
+  const authIdMismatch =
+    vendor === 'StripePrivy' &&
+    !!PRIVY_SIGNER_ID &&
+    !!authorizationId.trim() &&
+    normalizeKeyId(authorizationId) !== normalizeKeyId(PRIVY_SIGNER_ID)
+  const privyMismatch = appIdMismatch || authIdMismatch
 
   const handleSetup = async () => {
     setRunning(true); setError('')
@@ -116,6 +142,9 @@ function QuickSetup() {
     if (running) return false
     if (!providerName || !managerName || !connectorName) return false
     if (vendor === 'CoinbaseCDP') return !!(apiKeyId && apiKeySecret && walletSecret)
+    // Block on an App ID or authorization-key mismatch — the agent could never
+    // authenticate/sign against the Privy app + key the Connect Agent flow uses.
+    if (privyMismatch) return false
     return !!(appId && appSecret && authorizationId && authorizationPrivateKey)
   })()
 
@@ -187,8 +216,18 @@ function QuickSetup() {
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 pl-6">
                 <Input label="Provider Name" value={providerName} onChange={(e) => setProviderName(e.target.value.replace(/[^a-zA-Z0-9\-_]/g, ''))} placeholder="my-stripe-provider" disabled={running} />
                 <Input label="Privy App ID" value={appId} onChange={(e) => setAppId(e.target.value)} placeholder="App ID from Privy Dashboard" disabled={running} />
+                {appIdMismatch && (
+                  <p className="sm:col-span-2 rounded-lg bg-warning-muted px-3 py-2 text-xs text-warning">
+                    This App ID does not match the deployed <code className="font-mono">VITE_PRIVY_APP_ID</code>. The Connect Agent flow signs users into that Privy app, so the credential provider must use the same App ID or the agent operates against a different app than where the wallets live.
+                  </p>
+                )}
                 <Input label="Privy App Secret" type="password" value={appSecret} onChange={(e) => setAppSecret(e.target.value)} placeholder="••••••••" disabled={running} />
                 <Input label="Authorization Key ID" value={authorizationId} onChange={(e) => setAuthorizationId(e.target.value)} placeholder="P256 key ID from Privy Dashboard" disabled={running} />
+                {authIdMismatch && (
+                  <p className="sm:col-span-2 rounded-lg bg-warning-muted px-3 py-2 text-xs text-warning">
+                    This Authorization Key ID does not match the deployed <code className="font-mono">VITE_PRIVY_SIGNER_ID</code>. The Connect Agent flow delegates wallets to <code className="font-mono">VITE_PRIVY_SIGNER_ID</code>, so the agent can only sign if this credential provider uses the same authorization key.
+                  </p>
+                )}
                 <Input label="Authorization Private Key" type="password" value={authorizationPrivateKey} onChange={(e) => setAuthorizationPrivateKey(e.target.value)} placeholder="••••••••" disabled={running} />
               </div>
             )}

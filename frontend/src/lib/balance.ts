@@ -66,7 +66,9 @@ export async function getUsdcBalance(
     const fractionStr = fraction.toString().padStart(decimals, '0').slice(0, 6)
     return `${whole.toString()}.${fractionStr}`
   } catch (e) {
-    console.warn('Failed to fetch instrument balance:', e)
+    // Log only the message, not the raw exception object, which could carry
+    // API-response detail.
+    console.warn('Failed to fetch instrument balance:', e instanceof Error ? e.message : String(e))
     return '—'
   }
 }

@@ -8,6 +8,7 @@ import {
   confirmSignUp as cognitoConfirmSignUp,
 } from '@/lib/auth'
 import type { UserRole } from '@/lib/auth'
+import { useAdminStore, useUserStore, useChatStore } from '@/store'
 
 interface AuthState {
   isAuthenticated: boolean
@@ -96,6 +97,14 @@ export const useAuthStore = create<AuthState>((set) => ({
   signOut: () => {
     cognitoSignOut()
     set({ isAuthenticated: false, email: null, userId: null, role: null, error: null, needsConfirmation: false, pendingEmail: null })
+    // Reset the data stores too. Logout is an SPA navigate() (no page reload),
+    // so these in-memory stores otherwise survive across sessions — letting
+    // admin-fetched control-plane data (from the unfiltered /admin endpoints)
+    // leak into a subsequent user session. Resetting guarantees a clean slate
+    // regardless of the prior role.
+    useAdminStore.getState().reset()
+    useUserStore.getState().reset()
+    useChatStore.getState().reset()
   },
 
   checkSession: async () => {

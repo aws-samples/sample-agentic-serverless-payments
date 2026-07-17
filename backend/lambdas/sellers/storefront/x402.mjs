@@ -195,18 +195,20 @@ export async function verifyOrder(event, sellerConfig) {
     // `accepted` object is the public payment requirements the client already
     // received in the 402.
     if (hasProof) {
-      let reason = "unknown";
-      try {
-        const h = result.response?.headers?.["PAYMENT-REQUIRED"] || result.response?.headers?.["payment-required"];
-        if (h) reason = JSON.parse(Buffer.from(h, "base64").toString())?.error || "unknown";
-      } catch { /* ignore */ }
-      // Log only the status and rejection reason. The submitted payment payload
-      // (which can carry wallet addresses and other metadata) is not logged.
-      console.warn(JSON.stringify({
-        event: "order_verify_rejected",
-        reason,
-        status: result.response?.status,
-      }));
+      // Production logs carry only the event and HTTP status — no payment
+      // context — to avoid a side channel for tracking payment attempts. The
+      // facilitator rejection reason aids diagnosis but is payment-related, so
+      // it is included only under an explicit debug flag that is off in prod.
+      const logEntry = { event: "order_verify_rejected", status: result.response?.status };
+      if (process.env.DEBUG_PAYMENT_LOGS === "1") {
+        let reason = "unknown";
+        try {
+          const h = result.response?.headers?.["PAYMENT-REQUIRED"] || result.response?.headers?.["payment-required"];
+          if (h) reason = JSON.parse(Buffer.from(h, "base64").toString())?.error || "unknown";
+        } catch { /* ignore */ }
+        logEntry.reason = reason;
+      }
+      console.warn(JSON.stringify(logEntry));
     }
     return { kind: result.response?.status === 402 ? "unpaid" : "error", response: result.response };
   }

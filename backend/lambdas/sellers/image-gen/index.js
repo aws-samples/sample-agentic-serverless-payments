@@ -54,16 +54,16 @@ const bedrock = new BedrockRuntimeClient({ region: REGION });
 // Request logging
 app.use("*", async (c, next) => {
   const start = Date.now();
-  const sig = c.req.header("payment-signature");
+  // Log only non-sensitive request metadata. Payment-signature presence/length
+  // is intentionally omitted to avoid a side channel for tracking payment
+  // attempts in production logs.
   console.log(JSON.stringify({
     event: "request_in", method: c.req.method, path: c.req.path,
-    hasPaymentSignature: !!sig, paymentSignatureLength: sig?.length || 0,
   }));
   await next();
   console.log(JSON.stringify({
     event: "response_out", method: c.req.method, path: c.req.path,
     status: c.res.status, durationMs: Date.now() - start,
-    hasPaymentSignature: !!sig,
   }));
 });
 
@@ -151,9 +151,11 @@ app.post("/image-gen", async (c) => {
       x402_meta: { seller: "ai-image-gen", version: "1.0", generated_at: new Date().toISOString() },
     });
   } catch (err) {
+    // Log detail server-side; return a generic message to the client so raw
+    // error detail (which may echo prompt/API internals) is not exposed.
     console.error("Image gen error:", err?.message);
     return c.json({
-      x402_content: { type: "text", data: `Image generation error: ${err.message}`, title: "Generation failed", mime_type: "text/plain" },
+      x402_content: { type: "text", data: "Image generation failed. Please try again.", title: "Generation failed", mime_type: "text/plain" },
       x402_meta: { seller: "ai-image-gen", version: "1.0" },
     }, 500);
   }

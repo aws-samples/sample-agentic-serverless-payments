@@ -21,6 +21,16 @@ import type { CredentialProvider, Vendor } from '@/types'
 
 type VendorTab = Vendor
 
+// The deployed frontend signer ID. The Connect Agent flow delegates user
+// wallets to this authorization key, so a StripePrivy credential provider must
+// be created with the SAME key (its Authorization Key ID must equal this) or
+// the agent signs with a key the wallet never authorized and ProcessPayment
+// fails. Used below to warn admins on a mismatch at create/rotate time.
+const PRIVY_SIGNER_ID = import.meta.env.VITE_PRIVY_SIGNER_ID as string | undefined
+const PRIVY_APP_ID = import.meta.env.VITE_PRIVY_APP_ID as string | undefined
+
+const normalizeKeyId = (value: string) => value.trim().replace(/^wallet-auth:/, '')
+
 export function CredentialProviders() {
   const { credentialProviders, addCredentialProvider, removeCredentialProvider, setCredentialProviders, updateCredentialProvider } = useAdminStore()
   const [creating, setCreating] = useState(false)
@@ -131,9 +141,28 @@ export function CredentialProviders() {
     finally { setLoading(false) }
   }
 
+  // Block when a StripePrivy provider's App ID or Authorization Key ID does not
+  // match the deployed VITE_PRIVY_APP_ID / VITE_PRIVY_SIGNER_ID that the Connect
+  // Agent flow uses. A mismatch means the agent authenticates against a
+  // different Privy app, or signs with a key the wallet never authorized — so
+  // ProcessPayment can never succeed. Each check only fires when its frontend
+  // value is configured, so Coinbase / unconfigured deployments are unaffected.
+  const appIdMismatch =
+    vendor === 'StripePrivy' &&
+    !!PRIVY_APP_ID &&
+    !!appId.trim() &&
+    appId.trim() !== PRIVY_APP_ID.trim()
+  const authIdMismatch =
+    vendor === 'StripePrivy' &&
+    !!PRIVY_SIGNER_ID &&
+    !!authorizationId.trim() &&
+    normalizeKeyId(authorizationId) !== normalizeKeyId(PRIVY_SIGNER_ID)
+  const privyMismatch = appIdMismatch || authIdMismatch
+
   const canUpdate = (() => {
     if (!editing || loading) return false
     if (vendor === 'CoinbaseCDP') return !!(apiKeyId && apiKeySecret && walletSecret)
+    if (privyMismatch) return false
     return !!(appId && appSecret && authorizationId && authorizationPrivateKey)
   })()
 
@@ -141,6 +170,7 @@ export function CredentialProviders() {
   const canSubmit = (() => {
     if (!name || loading) return false
     if (vendor === 'CoinbaseCDP') return !!(apiKeyId && apiKeySecret && walletSecret)
+    if (privyMismatch) return false
     return !!(appId && appSecret && authorizationId && authorizationPrivateKey)
   })()
 
@@ -231,8 +261,18 @@ export function CredentialProviders() {
               ) : (
                 <>
                   <Input label="App ID" value={appId} onChange={(e) => setAppId(e.target.value)} placeholder="App ID from Privy Dashboard" />
+                  {appIdMismatch && (
+                    <p className="rounded-lg bg-warning-muted px-3 py-2 text-xs text-warning">
+                      This App ID does not match the deployed <code className="font-mono">VITE_PRIVY_APP_ID</code>. The Connect Agent flow signs users into that Privy app, so the credential provider must use the same App ID or the agent operates against a different app than where the wallets live.
+                    </p>
+                  )}
                   <Input label="App Secret" type="password" value={appSecret} onChange={(e) => setAppSecret(e.target.value)} placeholder="••••••••" />
                   <Input label="Authorization Key ID" value={authorizationId} onChange={(e) => setAuthorizationId(e.target.value)} placeholder="P256 key ID from Privy Dashboard" />
+                  {authIdMismatch && (
+                    <p className="rounded-lg bg-warning-muted px-3 py-2 text-xs text-warning">
+                      This Authorization Key ID does not match the deployed <code className="font-mono">VITE_PRIVY_SIGNER_ID</code>. The Connect Agent flow delegates wallets to <code className="font-mono">VITE_PRIVY_SIGNER_ID</code>, so the agent can only sign if this credential provider uses the same authorization key.
+                    </p>
+                  )}
                   <Input label="Authorization Private Key" type="password" value={authorizationPrivateKey} onChange={(e) => setAuthorizationPrivateKey(e.target.value)} placeholder="••••••••" />
                   <p className="text-[10px] text-text-muted">Paste the P256 private key from the Privy dashboard. The <code className="font-mono">wallet-auth:</code> prefix is optional — the backend strips it.</p>
                 </>
@@ -273,8 +313,18 @@ export function CredentialProviders() {
               ) : (
                 <>
                   <Input label="App ID" value={appId} onChange={(e) => setAppId(e.target.value)} placeholder="App ID from Privy Dashboard" />
+                  {appIdMismatch && (
+                    <p className="rounded-lg bg-warning-muted px-3 py-2 text-xs text-warning">
+                      This App ID does not match the deployed <code className="font-mono">VITE_PRIVY_APP_ID</code>. The Connect Agent flow signs users into that Privy app, so the credential provider must use the same App ID or the agent operates against a different app than where the wallets live.
+                    </p>
+                  )}
                   <Input label="App Secret" type="password" value={appSecret} onChange={(e) => setAppSecret(e.target.value)} placeholder="••••••••" />
                   <Input label="Authorization Key ID" value={authorizationId} onChange={(e) => setAuthorizationId(e.target.value)} placeholder="P256 key ID from Privy Dashboard" />
+                  {authIdMismatch && (
+                    <p className="rounded-lg bg-warning-muted px-3 py-2 text-xs text-warning">
+                      This Authorization Key ID does not match the deployed <code className="font-mono">VITE_PRIVY_SIGNER_ID</code>. The Connect Agent flow delegates wallets to <code className="font-mono">VITE_PRIVY_SIGNER_ID</code>, so the agent can only sign if this credential provider uses the same authorization key.
+                    </p>
+                  )}
                   <Input label="Authorization Private Key" type="password" value={authorizationPrivateKey} onChange={(e) => setAuthorizationPrivateKey(e.target.value)} placeholder="••••••••" />
                 </>
               )}

@@ -255,6 +255,8 @@ StripePrivy-backed wallets require attaching the AgentCore authorization-key quo
 
 Both values are public identifiers; the private key and app secret stay on the backend and are entered directly in the admin surface (Credential Providers page).
 
+> **Important — the signer and the credential provider must use the same authorization key.** `VITE_PRIVY_SIGNER_ID` must be the **same** Privy authorization key whose private key you later paste as the Credential Provider's **Authorization Private Key** — i.e. the credential provider's **Authorization Key ID** must equal `VITE_PRIVY_SIGNER_ID`. The Add Signer flow grants your wallet delegation to `VITE_PRIVY_SIGNER_ID`, and the agent signs with the credential provider's key; if they are different keys, `ProcessPayment` will be rejected by Privy at signing time even though everything appears configured.
+
 ### Manual Installation
 
 If you prefer to deploy step by step:

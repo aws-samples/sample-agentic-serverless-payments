@@ -599,7 +599,7 @@ def _process_seller_media(data: dict) -> dict:
         try:
             decoded = _b64.b64decode(raw_data)
             s3 = boto3.client("s3", region_name=AWS_REGION)
-            s3.put_object(Bucket=MEDIA_BUCKET, Key=s3_key, Body=decoded, ContentType=mime)
+            s3.put_object(Bucket=MEDIA_BUCKET, Key=s3_key, Body=decoded, ContentType=mime, ServerSideEncryption="AES256")
             presigned_url = s3.generate_presigned_url(
                 "get_object",
                 Params={"Bucket": MEDIA_BUCKET, "Key": s3_key},
@@ -617,6 +617,7 @@ def _process_seller_media(data: dict) -> dict:
                     s3.put_object(
                         Bucket=LIBRARY_BUCKET, Key=lib_key, Body=decoded,
                         ContentType=mime, Metadata={"userId": user_id, "source": "generated"},
+                        ServerSideEncryption="AES256",
                     )
                     _logger.info("Saved generated %s to library bucket", content_type)
                 except Exception as lib_err:

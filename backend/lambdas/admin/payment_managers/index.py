@@ -50,7 +50,10 @@ def handler(event, context):
         else:
             return error("Method not allowed", 405)
     except Exception as e:
-        return error(str(e), 500)
+        # Log detail server-side (CloudWatch); return a generic message to the
+        # client so raw internal exception details are not exposed to callers.
+        print(f"payment_managers handler error: {type(e).__name__}: {e}")
+        return error("Internal server error", 500)
 
 
 def create(cp, event):

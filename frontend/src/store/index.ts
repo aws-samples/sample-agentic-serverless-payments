@@ -23,13 +23,18 @@ interface AdminState {
   removePaymentManager: (id: string) => void
   removePaymentConnector: (managerId: string, connectorId: string) => void
   markPrefetched: () => void
+  reset: () => void
+}
+
+const ADMIN_INITIAL = {
+  credentialProviders: [] as CredentialProvider[],
+  paymentManagers: [] as PaymentManager[],
+  paymentConnectors: [] as PaymentConnector[],
+  _prefetched: false,
 }
 
 export const useAdminStore = create<AdminState>((set) => ({
-  credentialProviders: [],
-  paymentManagers: [],
-  paymentConnectors: [],
-  _prefetched: false,
+  ...ADMIN_INITIAL,
   setCredentialProviders: (v) => set({ credentialProviders: v }),
   setPaymentManagers: (v) => set({ paymentManagers: v }),
   setPaymentConnectors: (v) => set({ paymentConnectors: v }),
@@ -65,6 +70,9 @@ export const useAdminStore = create<AdminState>((set) => ({
     ),
   })),
   markPrefetched: () => set({ _prefetched: true }),
+  // Restore initial state. Called on sign-out so control-plane data fetched
+  // during an admin session never leaks into a subsequent user session.
+  reset: () => set({ ...ADMIN_INITIAL }),
 }))
 
 interface UserState {
@@ -81,13 +89,18 @@ interface UserState {
   removeInstrument: (id: string) => void
   removeSession: (id: string) => void
   markPrefetched: () => void
+  reset: () => void
+}
+
+const USER_INITIAL = {
+  instruments: [] as PaymentInstrument[],
+  sessions: [] as PaymentSession[],
+  transactions: [] as ProcessPaymentResult[],
+  _prefetched: false,
 }
 
 export const useUserStore = create<UserState>((set) => ({
-  instruments: [],
-  sessions: [],
-  transactions: [],
-  _prefetched: false,
+  ...USER_INITIAL,
   setInstruments: (v) => set({ instruments: v }),
   setSessions: (v) => set({ sessions: v }),
   setTransactions: (v) => set({ transactions: v }),
@@ -101,6 +114,7 @@ export const useUserStore = create<UserState>((set) => ({
     sessions: s.sessions.filter((x) => x.paymentSessionId !== id),
   })),
   markPrefetched: () => set({ _prefetched: true }),
+  reset: () => set({ ...USER_INITIAL }),
 }))
 
 interface ChatState {
@@ -112,12 +126,17 @@ interface ChatState {
   setWsStatus: (s: WebSocketStatus) => void
   toggleVoiceMode: () => void
   clearMessages: () => void
+  reset: () => void
+}
+
+const CHAT_INITIAL = {
+  messages: [] as AgentMessage[],
+  wsStatus: 'disconnected' as WebSocketStatus,
+  isVoiceMode: false,
 }
 
 export const useChatStore = create<ChatState>((set) => ({
-  messages: [],
-  wsStatus: 'disconnected',
-  isVoiceMode: false,
+  ...CHAT_INITIAL,
   addMessage: (m) => set((s) => ({ messages: [...s.messages, m] })),
   updateMessage: (id, content, streaming) => set((s) => ({
     messages: s.messages.map((m) => m.id === id ? { ...m, content, isStreaming: streaming ?? false } : m),
@@ -125,4 +144,5 @@ export const useChatStore = create<ChatState>((set) => ({
   setWsStatus: (wsStatus) => set({ wsStatus }),
   toggleVoiceMode: () => set((s) => ({ isVoiceMode: !s.isVoiceMode })),
   clearMessages: () => set({ messages: [] }),
+  reset: () => set({ ...CHAT_INITIAL }),
 }))

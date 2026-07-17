@@ -94,6 +94,12 @@ in `.env`:
 Both are public identifiers. The App Secret and Authorization Private Key stay on
 the backend and are entered only on the admin Credential Providers page.
 
+`VITE_PRIVY_SIGNER_ID` must be the same authorization key as the Credential
+Provider's Authorization Key ID (whose private key is the Authorization Private
+Key). The Add Signer flow delegates the wallet to `VITE_PRIVY_SIGNER_ID`, and
+the agent signs with the credential provider's key — a mismatch makes
+`ProcessPayment` fail at signing time.
+
 Reference: [Privy add signers documentation](https://docs.privy.io/wallets/using-wallets/signers/add-signers)
 and the [Privy website](https://www.privy.io/).
 
