@@ -73,29 +73,47 @@ app.use("*", async (c, next) => {
 // config, then cached for the life of the container. The provisioned wallet is
 // static per deploy, so capturing it once is safe — same reasoning as the
 // storefront's cached resource server.
+async function buildPaymentMiddleware() {
+  const sellerConfig = await getSellerConfig();
+  const accepts = buildAccepts(sellerConfig);
+  if (!accepts.length) {
+    // No provisioned seller wallet yet → no payment middleware. The route
+    // handler below returns a clear 503 so the caller knows to run Seller
+    // Setup, rather than getting an opaque x402 error.
+    return null;
+  }
+  const facilitatorClient = new HTTPFacilitatorClient({ url: X402_CONFIG.facilitatorUrl });
+  const server = new x402ResourceServer(facilitatorClient);
+  registerExactEvmScheme(server);
+  registerExactSvmScheme(server);
+  const httpServer = new x402HTTPResourceServer(server, { "POST /image-gen": { accepts } });
+  await httpServer.initialize(); // fetch /supported (feePayer, supported kinds)
+  return paymentMiddlewareFromHTTPServer(httpServer, undefined, undefined, false);
+}
+
+// Cache only a *successfully built* middleware. The in-flight promise is shared
+// so concurrent first requests don't each rebuild, but a null result (wallet
+// not provisioned yet) or a rejection (e.g. a transient x402 facilitator outage
+// during initialize()) is NOT cached: it clears the slot so the next request
+// retries. Caching those states would strand a warm container returning 503/500
+// for the rest of its life — even after Seller Setup runs or the facilitator
+// recovers — until an unrelated cold start.
 let _middlewarePromise = null;
 
 async function getPaymentMiddleware() {
   if (!_middlewarePromise) {
-    _middlewarePromise = (async () => {
-      const sellerConfig = await getSellerConfig();
-      const accepts = buildAccepts(sellerConfig);
-      if (!accepts.length) {
-        // No provisioned seller wallet yet → no payment middleware. The route
-        // handler below returns a clear 503 so the caller knows to run Seller
-        // Setup, rather than getting an opaque x402 error.
-        return null;
-      }
-      const facilitatorClient = new HTTPFacilitatorClient({ url: X402_CONFIG.facilitatorUrl });
-      const server = new x402ResourceServer(facilitatorClient);
-      registerExactEvmScheme(server);
-      registerExactSvmScheme(server);
-      const httpServer = new x402HTTPResourceServer(server, { "POST /image-gen": { accepts } });
-      await httpServer.initialize(); // fetch /supported (feePayer, supported kinds)
-      return paymentMiddlewareFromHTTPServer(httpServer, undefined, undefined, false);
-    })();
+    _middlewarePromise = buildPaymentMiddleware();
   }
-  return _middlewarePromise;
+  try {
+    const middleware = await _middlewarePromise;
+    if (!middleware) {
+      _middlewarePromise = null; // retry once the wallet is provisioned
+    }
+    return middleware;
+  } catch (err) {
+    _middlewarePromise = null; // retry after a transient build/facilitator failure
+    throw err;
+  }
 }
 
 app.use("/image-gen", async (c, next) => {
