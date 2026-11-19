@@ -136,7 +136,17 @@ export async function putOrder(order) {
   await ddb.send(new PutCommand({ TableName: ORDERS_TABLE, Item: order }));
 }
 
-export async function updateOrderStatus(orderId, status, extra = {}) {
+/**
+ * Update an order's status (plus any `extra` attributes).
+ *
+ * Without `expect` the write is unconditional. With `expect` it is a
+ * compare-and-set: it applies only if the order is still in `expect.status`
+ * (and, with `expect.notDownloaded`, has not been downloaded; with
+ * `expect.refundAttemptId`, is still owned by that refund attempt). It returns
+ * false instead of writing when the order has moved on, so two requests racing
+ * on one order cannot both act on the same state.
+ */
+export async function updateOrderStatus(orderId, status, extra = {}, expect = null) {
   const names = { "#s": "status" };
   const values = { ":s": status, ":u": new Date().toISOString() };
   let setExpr = "#s = :s, updatedAt = :u";
@@ -145,13 +155,37 @@ export async function updateOrderStatus(orderId, status, extra = {}) {
     values[`:v${i}`] = v;
     setExpr += `, #k${i} = :v${i}`;
   });
-  await ddb.send(new UpdateCommand({
-    TableName: ORDERS_TABLE,
-    Key: { orderId },
-    UpdateExpression: `SET ${setExpr}`,
-    ExpressionAttributeNames: names,
-    ExpressionAttributeValues: values,
-  }));
+
+  const conditions = [];
+  if (expect?.status) {
+    values[":expected"] = expect.status;
+    conditions.push("#s = :expected");
+  }
+  if (expect?.notDownloaded) {
+    names["#dl"] = "downloaded";
+    values[":true"] = true;
+    conditions.push("(attribute_not_exists(#dl) OR #dl <> :true)");
+  }
+  if (expect?.refundAttemptId) {
+    names["#ra"] = "refundAttemptId";
+    values[":ra"] = expect.refundAttemptId;
+    conditions.push("#ra = :ra");
+  }
+
+  try {
+    await ddb.send(new UpdateCommand({
+      TableName: ORDERS_TABLE,
+      Key: { orderId },
+      UpdateExpression: `SET ${setExpr}`,
+      ...(conditions.length ? { ConditionExpression: conditions.join(" AND ") } : {}),
+      ExpressionAttributeNames: names,
+      ExpressionAttributeValues: values,
+    }));
+    return true;
+  } catch (e) {
+    if (conditions.length && e.name === "ConditionalCheckFailedException") return false;
+    throw e;
+  }
 }
 
 export async function listOrders(limit = 100) {

@@ -21,7 +21,7 @@ export function statusBadgeClasses(status: string): string {
   const s = (status || 'UNKNOWN').toUpperCase()
   if (['READY', 'ACTIVE', 'PROOF_GENERATED'].includes(s))
     return 'bg-success-muted text-success'
-  if (['PENDING', 'CREATING', 'UPDATING'].includes(s))
+  if (['PENDING', 'CREATING', 'UPDATING', 'REFUNDING'].includes(s))
     return 'bg-warning-muted text-warning'
   if (['FAILED', 'ERROR', 'DELETED'].includes(s))
     return 'bg-danger-muted text-danger'
