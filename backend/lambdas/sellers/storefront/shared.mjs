@@ -472,10 +472,11 @@ export async function listLibrary(userId) {
     const orders = await listOrdersByUser(userId);
     for (const o of orders) {
       // Only confirmed digital-file purchases that still have a library copy
-      // and have not been refunded belong in the library.
+      // belong in the library: not refunded, and not mid-refund (REFUNDING),
+      // when the file can no longer be downloaded.
       const isFile = (o.fulfillmentType || "digital") === "digital" && o.libraryKey;
       if (!isFile) continue;
-      if (o.status === "REFUNDED") continue;
+      if (o.status !== "CONFIRMED") continue;
       const it = (o.items && o.items[0]) || {};
       items.push({
         kind: "purchase",

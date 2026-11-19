@@ -69,7 +69,9 @@ export function SellerOrders() {
     { key: 'created', header: 'Created', render: (r: any) => <span className="text-[11px] text-text-muted">{r.createdAt ? formatDate(r.createdAt) : '—'}</span> },
     { key: 'actions', header: '', className: 'w-32', render: (r: any) => {
       if (r.status !== 'CONFIRMED') {
-        return r.status === 'REFUNDED' ? <span className="text-[10px] text-text-muted">refunded</span> : null
+        if (r.status === 'REFUNDED') return <span className="text-[10px] text-text-muted">refunded</span>
+        if (r.status === 'REFUNDING') return <span className="text-[10px] text-text-muted">refund in progress</span>
+        return null
       }
       // Downloaded → non-refundable via the normal path; admin can force.
       if (r.downloaded === true) {

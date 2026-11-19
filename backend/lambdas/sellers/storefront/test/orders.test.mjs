@@ -54,6 +54,7 @@ mock.module("../payments.mjs", {
 });
 
 const { handler } = await import("../orders.mjs");
+const { listLibrary } = await import("../shared.mjs");
 
 // ── Fixtures ──
 const PRODUCT = { productId: "lic-1", name: "Dataset License", priceUsd: 2.5, inventory: 10, active: true, fulfillmentType: "digital", deliveryKind: "license" };
@@ -150,6 +151,21 @@ test("a download that lands while a refund is paying out is refused", async () =
   assert.equal(r.status, 200);
   assert.equal(d.status, 409, "goods must not be handed out during a refund");
   assert.equal(db.get("Orders", { orderId }).downloaded, false);
+});
+
+test("an order being refunded leaves the library, and returns if the payout fails", async () => {
+  const orderId = await placeDownloadableOrder();
+  const inLibrary = async () => (await listLibrary("user-1")).some((i) => i.orderId === orderId);
+  assert.equal(await inLibrary(), true);
+
+  payouts.result = { ok: false, error: "not yet valid", retryable: true };
+  const refunding = handler(refund(orderId));
+  await sleep(5); // the payout is now in flight
+  assert.equal(db.get("Orders", { orderId }).status, "REFUNDING");
+  assert.equal(await inLibrary(), false, "a file mid-refund must not be offered for download");
+
+  assert.equal(parse(await refunding).status, 502);
+  assert.equal(await inLibrary(), true, "a failed payout restores the purchase");
 });
 
 // Matches an UpdateCommand whose SET clause assigns `attr` (not one that only

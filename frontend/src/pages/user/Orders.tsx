@@ -88,7 +88,8 @@ export function Orders() {
       <span className="text-[11px] text-text-muted">
         {r.fulfillmentType === 'physical'
           ? (r.shippingAddress ? r.shippingAddress : (r.estimatedDelivery || '—'))
-          : (r.status === 'REFUNDED' ? 'removed from library' : 'in library')}
+          : (r.status === 'REFUNDED' ? 'removed from library'
+            : r.status === 'REFUNDING' ? 'refund in progress' : 'in library')}
       </span>
     ) },
     { key: 'date', header: 'Date', render: (r: OrderRow) => (

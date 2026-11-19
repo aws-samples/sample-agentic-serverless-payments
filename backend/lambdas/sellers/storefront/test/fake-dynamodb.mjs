@@ -5,7 +5,8 @@
  * in-process store instead of AWS. It implements just the surface the storefront
  * uses: Get/Put/Update/Delete/Scan/Query, condition expressions (comparisons,
  * attribute_exists / attribute_not_exists, AND / OR / NOT, parentheses), and
- * SET update expressions with `+` / `-`. A failed condition throws an error
+ * SET (with `+` / `-`) and REMOVE update clauses. As in DynamoDB, a comparison
+ * against a missing attribute is false. A failed condition throws an error
  * named ConditionalCheckFailedException, like the real service.
  *
  * Every send() yields to the event loop first, so concurrent requests
@@ -17,7 +18,7 @@
 import { mock } from "node:test";
 import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 
-const KEY_ATTRS = ["orderId", "productId", "pk"];
+const KEY_ATTRS = ["orderId", "productId", "pk", "idempotencyKey"];
 
 export function installFakeDynamoDB() {
   const tables = new Map();
@@ -142,8 +143,10 @@ function evaluate(expr, item, ctx) {
     const left = operand(tok, item, ctx);
     const op = take();
     const right = operand(take(), item, ctx);
+    // DynamoDB evaluates any comparison involving a missing attribute as false.
+    if (left === undefined || right === undefined) return false;
     switch (op) {
-      case "=": return left !== undefined && left === right;
+      case "=": return left === right;
       case "<>": return left !== right;
       case "<": return left < right;
       case "<=": return left <= right;
@@ -166,10 +169,13 @@ function evaluate(expr, item, ctx) {
 }
 
 function applyUpdate(expr, item, ctx) {
-  const m = /^\s*SET\s+(.*)$/s.exec(expr || "");
-  if (!m) throw new Error(`fake-dynamodb: only SET updates are supported ("${expr}")`);
+  const m = /^\s*SET\s+(.*?)(?:\s+REMOVE\s+(.*))?$/s.exec(expr || "");
+  if (!m) throw new Error(`fake-dynamodb: only SET [REMOVE] updates are supported ("${expr}")`);
   // Evaluate every right-hand side against the pre-update item, as DynamoDB does.
   const before = structuredClone(item);
+  for (const attr of (m[2] || "").split(",").map((a) => a.trim()).filter(Boolean)) {
+    delete item[attrName(attr, ctx)];
+  }
   for (const clause of m[1].split(",")) {
     const toks = tokenize(clause);
     const target = attrName(toks[0], ctx);
