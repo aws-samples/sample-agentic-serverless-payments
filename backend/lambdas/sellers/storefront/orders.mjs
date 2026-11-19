@@ -321,11 +321,16 @@ async function downloadOrder(orderId, event) {
   }
 
   // Mark downloaded (idempotent) — this is what makes the order non-refundable.
+  // Conditional on the order still being CONFIRMED, so a download can neither
+  // slip in while a refund is paying out nor rewrite a refunded order's status.
   if (order.downloaded !== true) {
-    await updateOrderStatus(orderId, order.status, {
+    const marked = await updateOrderStatus(orderId, "CONFIRMED", {
       downloaded: true,
       downloadedAt: new Date().toISOString(),
-    });
+    }, { status: "CONFIRMED" });
+    if (!marked) {
+      return json({ error: "This order is being refunded; the file is no longer available." }, 409);
+    }
   }
 
   const filename = (order.libraryKey || "").split("/").pop() || "download";
@@ -356,7 +361,8 @@ async function updateOrder(orderId, event) {
   const newAddress = body.shippingAddress || body.address;
   if (!newAddress) return json({ error: "shippingAddress is required" }, 400);
 
-  await updateOrderStatus(orderId, order.status, { shippingAddress: newAddress });
+  const updated = await updateOrderStatus(orderId, "CONFIRMED", { shippingAddress: newAddress }, { status: "CONFIRMED" });
+  if (!updated) return json({ error: "Order can no longer be changed" }, 409);
 
   // Re-send the confirmation with the updated address (graceful fallback).
   const product = (order.items && order.items[0]) ? await getProduct(order.items[0].productId) : null;
@@ -378,6 +384,24 @@ async function updateOrder(orderId, event) {
 }
 
 // ── Refund: seller-originated reverse payment, governed by a capped session ──
+
+// Why an order cannot be refunded right now (a 409 response), or null if it can.
+function refundConflict(order, forced) {
+  if (order.status === "REFUNDED") return json({ error: "Order already refunded", order }, 409);
+  if (order.status === "REFUNDING") return json({ error: "A refund for this order is already in progress" }, 409);
+  if (order.status !== "CONFIRMED") {
+    return json({ error: `Only CONFIRMED orders can be refunded (status: ${order.status})` }, 409);
+  }
+  if (order.downloaded === true && !forced) {
+    return json({
+      error: "This order was already downloaded and is no longer refundable.",
+      downloaded: true,
+      forceRefundable: true,
+    }, 409);
+  }
+  return null;
+}
+
 // ``opts.allowForce`` is true only on the authed admin route. The public agent
 // path can refund a normal (not-downloaded) order but can never force.
 async function refundOrder(orderId, event, opts = {}) {
@@ -389,10 +413,6 @@ async function refundOrder(orderId, event, opts = {}) {
 
   const order = await getOrder(orderId);
   if (!order) return json({ error: "Order not found" }, 404);
-  if (order.status === "REFUNDED") return json({ error: "Order already refunded", order }, 409);
-  if (order.status !== "CONFIRMED") {
-    return json({ error: `Only CONFIRMED orders can be refunded (status: ${order.status})` }, 409);
-  }
   // Downloaded digital goods are non-refundable via the self-serve / agent
   // path. An admin can still override with force=true (e.g. a support case),
   // which we record on the order for the audit trail.
@@ -402,15 +422,29 @@ async function refundOrder(orderId, event, opts = {}) {
   // allowForce is false, so a forced flag in the body is ignored — the agent
   // can never override the downloaded-is-final rule.
   const forced = allowForce && (refundBody.force === true || refundBody.force === "true");
-  if (order.downloaded === true && !forced) {
-    return json({
-      error: "This order was already downloaded and is no longer refundable.",
-      downloaded: true,
-      forceRefundable: true,
-    }, 409);
-  }
+  const conflict = refundConflict(order, forced);
+  if (conflict) return conflict;
   if (!order.buyerWalletAddress) {
     return json({ error: "No buyer wallet address on order — cannot refund" }, 422);
+  }
+
+  // Claim the order before any money moves: CONFIRMED → REFUNDING is a
+  // compare-and-set, so of several concurrent refund requests (a retried tool
+  // call, a double-click, a scripted burst) exactly one proceeds to pay out.
+  // Each refund runs in its own spend-capped session, so the cap bounds one
+  // payout, not the number of payouts; this claim is what bounds the count.
+  // The same condition re-checks the download rule, closing the window between
+  // the read above and the payout.
+  const refundAttemptId = crypto.randomUUID();
+  const claimed = await updateOrderStatus(orderId, "REFUNDING", {
+    refundAttemptId,
+    refundStartedAt: new Date().toISOString(),
+  }, { status: "CONFIRMED", notDownloaded: !forced });
+  if (!claimed) {
+    // Another request changed the order between the read above and the claim.
+    const current = await getOrder(orderId);
+    return (current && refundConflict(current, forced))
+      || json({ error: "The order changed while the refund was starting. Try again.", retryable: true }, 409);
   }
 
   // Outbound payment: seller → buyer, on the order's network, governed by a
@@ -426,19 +460,25 @@ async function refundOrder(orderId, event, opts = {}) {
   });
 
   // Only mark REFUNDED when the on-chain settle actually succeeded. Otherwise
-  // the funds never moved — leave the order CONFIRMED so it can be retried and
-  // report the real reason.
+  // the funds never moved, so return the order to CONFIRMED so it can be retried
+  // and report the real reason. (If this invocation dies mid-payout the order
+  // stays REFUNDING: the safe state when it is unknown whether funds moved.)
   if (!payout.ok) {
+    await updateOrderStatus(orderId, "CONFIRMED", { refundAttemptId: "" }, { status: "REFUNDING", refundAttemptId });
     return json({ error: payout.error, retryable: payout.retryable === true }, 502);
   }
 
   const refundTx = payout.refundTx || "";
-  await updateOrderStatus(orderId, "REFUNDED", {
+  const finalized = await updateOrderStatus(orderId, "REFUNDED", {
     refundTx,
     refundedAt: new Date().toISOString(),
     // Audit: was this an admin override of the downloaded-is-final rule?
     forcedRefund: forced === true && order.downloaded === true,
-  });
+  }, { status: "REFUNDING", refundAttemptId });
+  if (!finalized) {
+    // Unreachable while this attempt owns the claim; log loudly if it happens.
+    console.error(JSON.stringify({ event: "refund_finalize_conflict", orderId, refundTx }));
+  }
   // Restock the refunded item.
   for (const it of order.items || []) {
     await restockInventory(it.productId, it.qty).catch(() => {});

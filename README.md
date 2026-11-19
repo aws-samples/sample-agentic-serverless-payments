@@ -140,9 +140,9 @@ The seller diagram has four panels. Each panel's numbered flow is below.
 #### Refund (seller as payer)
 
 1. **Find and initiate.** When the buyer lacks the order id, the agent looks it up with `list_orders` (a buyer-scoped `GET /orders?userId=` lookup via the `buyerUserId` index), confirms the match, then `cancel_order` calls `POST /orders/{id}/refund` (consume-gated, so a downloaded item is non-refundable and the agent cannot force it; an admin can force via `POST /admin/storefront/orders/{id}/refund` from the Seller Orders page).
-2. **Capped session.** The orders Lambda's `refundOrder` calls `settlePayout`, which creates a per-refund payment session capped at exactly the refund amount, scoped to the seller `userId`.
+2. **Claim and capped session.** The orders Lambda's `refundOrder` first moves the order from `CONFIRMED` to `REFUNDING` with a conditional write, so of several concurrent refund requests only one pays out; the rest get HTTP 409. It then calls `settlePayout`, which creates a per-refund payment session capped at exactly the refund amount, scoped to the seller `userId`.
 3. **Pay the buyer.** It calls `ProcessPayment` with the seller's instrument for the order's network as the payer, then settles seller→buyer through the x402 facilitator.
-4. **Finalize.** On a successful settle the order is marked `REFUNDED`, inventory is restocked, and the buyer's library copy is removed.
+4. **Finalize.** On a successful settle the order is marked `REFUNDED`, inventory is restocked, and the buyer's library copy is removed. If the payout fails, the order returns to `CONFIRMED` so the refund can be retried. An order left in `REFUNDING` (the function stopped mid-payout) is not refunded again automatically: check the seller wallet's transfers on-chain, then set the order's status in the `StorefrontOrders` table by hand.
 
 ## Architecture Details
 
