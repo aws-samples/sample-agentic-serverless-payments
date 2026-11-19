@@ -51,9 +51,17 @@ class FakeResponse:
         return self._body
 
 
-def payment_required():
-    header = base64.b64encode(json.dumps({"x402Version": 2, "accepts": [ACCEPT]}).encode()).decode()
+def payment_required(error=None):
+    """A 402 carrying requirements in the v2 header, optionally with a facilitator error."""
+    requirements = {"x402Version": 2, "accepts": [ACCEPT]}
+    if error:
+        requirements["error"] = error
+    header = base64.b64encode(json.dumps(requirements).encode()).decode()
     return FakeResponse(402, {}, {"payment-required": header})
+
+
+# The image seller's own error body (its handler ran, so @x402/hono never settled).
+IMAGE_SELLER_ERROR = {"x402_content": {"type": "text", "data": "Image generation failed. Please try again."}}
 
 
 class PayAndRetryTest(unittest.TestCase):
@@ -103,8 +111,9 @@ class PayAndRetryTest(unittest.TestCase):
         err = ctx.exception
         self.assertEqual(err.attempts, 5)
         self.assertEqual(err.last_status, 402)
-        self.assertEqual(err.network, "eip155:84532")
-        self.assertEqual(err.amount, "40000")
+        self.assertEqual(err.network, "Base Sepolia")
+        self.assertEqual(err.amount, "0.04 USDC")
+        self.assertIn("one 0.04 USDC payment authorization was sent to the seller 5 times", str(err))
         self.assertEqual(tools._process_payment.call_count, 1, "exactly one payment is signed")
         signatures = {h["X-PAYMENT"] for h in self.signed_attempts()}
         self.assertEqual(len(signatures), 1, "every retry re-presents the same proof")
@@ -127,6 +136,60 @@ class PayAndRetryTest(unittest.TestCase):
         self.assertIsNone(ctx.exception.last_status)
         self.assertEqual(ctx.exception.detail, "ReadTimeout")
         self.assertIsInstance(ctx.exception.__cause__, requests.ReadTimeout)
+
+    def test_any_storefront_server_error_after_payment_raises_not_confirmed(self):
+        # The storefront can fail after it has settled, so every 5xx is open.
+        for status in (500, 502, 503):
+            self.responses = [payment_required(), FakeResponse(status, {"error": "Internal server error"})]
+            with self.assertRaises(tools.PaymentNotConfirmed, msg=status):
+                tools._pay_and_retry("https://storefront.example/orders", body={})
+
+    def test_other_exceptions_after_payment_raise_not_confirmed(self):
+        self.responses = [payment_required(), OSError("socket closed")]
+
+        with self.assertRaises(tools.PaymentNotConfirmed) as ctx:
+            tools._pay_and_retry("https://storefront.example/orders", body={})
+
+        self.assertEqual(ctx.exception.detail, "OSError")
+
+    def test_client_error_after_a_402_stays_unconfirmed(self):
+        # The first attempt's settlement may still be in flight.
+        self.responses = [payment_required(), FakeResponse(402), FakeResponse(409, {"error": "Out of stock"})]
+
+        with self.assertRaises(tools.PaymentNotConfirmed) as ctx:
+            tools._pay_and_retry("https://storefront.example/orders", body={})
+
+        self.assertEqual((ctx.exception.attempts, ctx.exception.last_status), (2, 409))
+
+    def test_connect_timeout_after_an_earlier_attempt_is_unconfirmed(self):
+        self.responses = [payment_required(), FakeResponse(402), requests.ConnectTimeout("connect timed out")]
+
+        with self.assertRaises(tools.PaymentNotConfirmed):
+            tools._pay_and_retry("https://storefront.example/orders", body={})
+
+    def test_facilitator_reason_is_surfaced(self):
+        self.responses = [payment_required()] + [payment_required(error="insufficient_funds")] * 5
+
+        with self.assertRaises(tools.PaymentNotConfirmed) as ctx:
+            tools._pay_and_retry("https://storefront.example/orders", body={})
+
+        self.assertEqual(ctx.exception.reason, "insufficient_funds")
+
+    def test_unconfirmed_payment_is_logged(self):
+        self.responses = [payment_required(), requests.ReadTimeout("read timed out")]
+
+        with self.assertLogs("payment-agent.tools", level="WARNING") as logs:
+            with self.assertRaises(tools.PaymentNotConfirmed):
+                tools._pay_and_retry("https://storefront.example/orders", body={})
+
+        self.assertTrue(any("not confirmed" in line and "ReadTimeout" in line for line in logs.output))
+
+    def test_image_seller_gateway_timeout_after_payment_is_unconfirmed(self):
+        # The handler may have succeeded and settled after the gateway gave up.
+        self.responses = [payment_required(), FakeResponse(504, {"message": "Endpoint request timed out"})]
+
+        with self.assertRaises(tools.PaymentNotConfirmed):
+            tools._pay_and_retry("https://seller.example/image-gen", body={}, settles_only_on_success=True)
 
     # ── Outcomes whose meaning is unchanged ──
 
@@ -154,6 +217,24 @@ class PayAndRetryTest(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         tools._process_payment.assert_not_called()
 
+    def test_connect_timeout_on_the_first_signed_attempt_means_nothing_was_sent(self):
+        self.responses = [payment_required(), requests.ConnectTimeout("connect timed out")]
+
+        with self.assertRaises(RuntimeError) as ctx:
+            tools._pay_and_retry("https://storefront.example/orders", body={})
+
+        self.assertNotIsInstance(ctx.exception, tools.PaymentNotConfirmed)
+        self.assertIn("never sent", str(ctx.exception))
+
+    def test_image_seller_handler_error_after_payment_was_not_charged(self):
+        # @x402/hono settles only after the handler succeeds, so the image
+        # seller's own 5xx error body means nothing was charged.
+        self.responses = [payment_required(), FakeResponse(500, IMAGE_SELLER_ERROR)]
+
+        resp = tools._pay_and_retry("https://seller.example/image-gen", body={}, settles_only_on_success=True)
+
+        self.assertEqual(resp.status_code, 500)
+
     def test_failure_before_signing_is_not_reported_as_unconfirmed(self):
         self.responses = [FakeResponse(402, {})]  # no requirements in header or body
 
@@ -170,22 +251,36 @@ class PayAndRetryTest(unittest.TestCase):
         result = json.loads(raw)
         self.assertEqual(result["paymentStatus"], "unconfirmed")
         self.assertTrue(result["paymentAttempted"])
-        self.assertIn("Do not retry", result["guidance"])
+        self.assertIn("signs a second payment", result["guidance"])
         self.assertNotIn("Payment failed", result["error"])
+        return result
 
     def test_buy_product_reports_an_unconfirmed_payment(self):
         self.responses = [payment_required()] + [FakeResponse(402, {"error": "settlement failed"})] * 5
 
         raw = tools.strands_buy_product("p1")
 
-        self.assert_unconfirmed_result(raw)
-        self.assertEqual(json.loads(raw)["sellerResponse"], json.dumps({"error": "settlement failed"}))
+        result = self.assert_unconfirmed_result(raw)
+        self.assertEqual(result["sellerResponse"], json.dumps({"error": "settlement failed"}))
+        self.assertEqual((result["amount"], result["network"]), ("0.04 USDC", "Base Sepolia"))
+        self.assertIn("list_orders", result["guidance"])
         self.assertEqual(tools._process_payment.call_count, 1)
 
     def test_generate_image_reports_an_unconfirmed_payment(self):
         self.responses = [payment_required(), requests.ConnectionError("reset")]
 
-        self.assert_unconfirmed_result(tools.strands_generate_image("a lighthouse at dusk"))
+        result = self.assert_unconfirmed_result(tools.strands_generate_image("a lighthouse at dusk"))
+        # The image seller keeps no order record, so only the balance can tell.
+        self.assertIn("check_balance", result["guidance"])
+        self.assertNotIn("list_orders", result["guidance"])
+
+    def test_generate_image_handler_error_after_payment_says_seller_error(self):
+        self.responses = [payment_required(), FakeResponse(500, IMAGE_SELLER_ERROR)]
+
+        result = json.loads(tools.strands_generate_image("a lighthouse at dusk"))
+
+        self.assertNotIn("paymentStatus", result)
+        self.assertTrue(result["error"].startswith("Seller returned 500"))
 
     def test_buy_product_out_of_stock_message_is_unchanged(self):
         self.responses = [payment_required(), FakeResponse(409, {"error": "Out of stock"})]
@@ -235,7 +330,7 @@ class PluginPathTest(unittest.TestCase):
 
         err = ctx.exception
         self.assertEqual((err.attempts, err.last_status), (1, 402))
-        self.assertEqual((err.network, err.amount), ("eip155:84532", "40000"))
+        self.assertEqual((err.network, err.amount), ("Base Sepolia", "0.04 USDC"))
 
     def test_server_error_to_a_signed_request_raises_not_confirmed(self):
         self.responses = [FakeResponse(504, {"message": "Endpoint request timed out"})]
@@ -253,6 +348,22 @@ class PluginPathTest(unittest.TestCase):
 
         self.assertIsNone(ctx.exception.last_status)
         self.assertIsInstance(ctx.exception.__cause__, requests.ReadTimeout)
+
+    def test_connect_timeout_on_a_signed_request_means_nothing_was_sent(self):
+        self.responses = [requests.ConnectTimeout("connect timed out")]
+
+        with self.assertRaises(RuntimeError) as ctx:
+            tools._paid_request("https://storefront.example/orders", body={}, headers=signed_header())
+
+        self.assertNotIsInstance(ctx.exception, tools.PaymentNotConfirmed)
+
+    def test_image_seller_handler_error_to_a_signed_request_was_not_charged(self):
+        self.responses = [FakeResponse(500, IMAGE_SELLER_ERROR)]
+
+        result = json.loads(tools.strands_generate_image("a lighthouse at dusk", headers=signed_header()))
+
+        self.assertNotIn("paymentStatus", result)
+        self.assertTrue(result["error"].startswith("Seller returned 500"))
 
     def test_unreadable_signed_header_still_reports_unconfirmed(self):
         self.responses = [FakeResponse(402)]
@@ -294,7 +405,7 @@ class PluginPathTest(unittest.TestCase):
         result = json.loads(tools.strands_buy_product("p1", headers=signed_header()))
 
         self.assertEqual(result["paymentStatus"], "unconfirmed")
-        self.assertIn("Do not retry", result["guidance"])
+        self.assertIn("list_orders", result["guidance"])
 
     def test_generate_image_reports_an_unconfirmed_payment_on_re_invocation(self):
         self.responses = [requests.ConnectionError("reset")]
