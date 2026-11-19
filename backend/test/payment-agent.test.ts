@@ -48,6 +48,20 @@ describe("PaymentAgentStack", () => {
     });
   });
 
+  test("idempotency table access is limited to item reads and writes", () => {
+    const [tableId] = Object.keys(template.findResources("AWS::DynamoDB::Table", {
+      Properties: { TableName: "StorefrontIdempotency" },
+    }));
+    const statements = Object.values(template.findResources("AWS::IAM::Policy"))
+      .flatMap((p: any) => p.Properties.PolicyDocument.Statement)
+      .filter((s: any) => JSON.stringify(s.Resource).includes(tableId));
+    expect(statements).toHaveLength(1);
+    expect(statements[0].Effect).toBe("Allow");
+    expect([...statements[0].Action].sort()).toEqual([
+      "dynamodb:DeleteItem", "dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem",
+    ]);
+  });
+
   test("creates the AgentCore runtime and memory", () => {
     template.resourceCountIs("AWS::BedrockAgentCore::Runtime", 1);
     template.resourceCountIs("AWS::BedrockAgentCore::Memory", 1);

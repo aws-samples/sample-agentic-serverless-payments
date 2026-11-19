@@ -883,7 +883,8 @@ def send_response(event, context, status, data):
     });
     productsTable.grantReadWriteData(orderFn);
     ordersTable.grantReadWriteData(orderFn);
-    idempotencyTable.grantReadWriteData(orderFn);
+    // Only the item operations the idempotency helpers in shared.mjs use.
+    idempotencyTable.grant(orderFn, "dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem");
     sellerConfigTable.grantReadData(orderFn);
 
     // Seller setup service — admin-triggered control-plane provisioning.
