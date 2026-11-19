@@ -38,6 +38,7 @@ import os
 import uuid as _uuid
 import logging
 import time as _time
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import boto3
@@ -149,6 +150,26 @@ def _has_payment_header(headers: dict | None) -> bool:
     if not headers:
         return False
     return any(str(k).upper() in ("PAYMENT-SIGNATURE", "X-PAYMENT") for k in headers)
+
+
+def _accept_from_payment_header(headers: dict | None) -> dict:
+    """Best-effort payment terms from a signed PAYMENT-SIGNATURE / X-PAYMENT header.
+
+    v2 headers carry the accepted requirements; v1 headers carry only the
+    network. Returns {} when the header can't be decoded, so reporting an
+    unconfirmed payment never depends on parsing it.
+    """
+    for key, value in (headers or {}).items():
+        if str(key).upper() not in ("PAYMENT-SIGNATURE", "X-PAYMENT"):
+            continue
+        try:
+            padded = str(value) + "=" * ((4 - len(str(value)) % 4) % 4)
+            payload = json.loads(_b64.b64decode(padded).decode("utf-8"))
+            accepted = payload.get("accepted")
+            return accepted if isinstance(accepted, dict) else {"network": payload.get("network", "")}
+        except Exception:
+            return {}
+    return {}
 
 
 def _payment_required_marker(requirements: dict, raw_header: str = "") -> str:
@@ -282,18 +303,161 @@ def _parse_payment_required(resp: _requests.Response) -> dict | None:
         return None
 
 
+_NETWORK_NAMES = {
+    "eip155:84532": "Base Sepolia",
+    "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1": "Solana Devnet",
+}
+
+
+def _display_network(network: str) -> str:
+    return _NETWORK_NAMES.get(network, network)
+
+
+def _display_amount(accept: dict) -> str:
+    """'0.04 USDC' from an accept's atomic amount; '' when it can't be read."""
+    raw = accept.get("amount") or accept.get("maxAmountRequired")
+    try:
+        decimals = int((accept.get("extra") or {}).get("decimals", 6))
+        value = Decimal(str(raw)) / (Decimal(10) ** decimals)
+    except (InvalidOperation, TypeError, ValueError):
+        return ""
+    return f"{value.normalize():f} USDC"
+
+
+# What the model should do after an unconfirmed payment, per paid tool. The
+# storefront records every order before it settles, so its order list is
+# conclusive; the image seller keeps no record, so only the balance can tell.
+UNCONFIRMED_GUIDANCE = {
+    "buy_product": (
+        "Do not buy this item again on your own: a new attempt signs a second payment. "
+        "Tell the user the payment is unconfirmed, then call list_orders. CONFIRMED means "
+        "it was paid and fulfilled, PENDING means it is still being processed, and VOIDED "
+        "or no matching order means nothing was charged. Offer to buy again only in that "
+        "last case."
+    ),
+    "generate_image": (
+        "Do not generate this image again on your own: a new attempt signs a second "
+        "payment. Tell the user the image was not delivered and the payment is "
+        "unconfirmed, so it may or may not be charged. Try again only if the user asks; "
+        "they can see whether it was charged with check_balance."
+    ),
+}
+
+# A connect timeout means the signed request never left the agent, so no seller
+# holds the authorization and nothing can settle.
+_PAYMENT_NOT_SENT = (
+    "Could not reach the seller, so the signed payment was never sent and nothing "
+    "was charged. It is safe to try again."
+)
+
+
+class PaymentNotConfirmed(RuntimeError):
+    """A signed payment was sent to the seller but never confirmed.
+
+    Raised once a payment has been signed (by ``_pay_and_retry`` when the plugin
+    is not attached, or by the AgentCorePaymentsPlugin before it re-invokes the
+    tool) and the seller's answer leaves its fate unknown: a 402, a 5xx that
+    the seller may have answered after settling (for example a gateway
+    timeout), or a broken connection. The authorization stays valid until it
+    expires, so the payment may or may not settle. Callers must NOT report this
+    as "not paid": an agent that reads a plain 402 as "pay" would sign a second
+    payment for the same purchase.
+    """
+
+    def __init__(self, url: str, accept: dict, attempts: int, last_status: int | None,
+                 detail: str, reason: str = ""):
+        self.url = url
+        self.network = _display_network(accept.get("network", ""))
+        self.amount = _display_amount(accept)
+        self.attempts = attempts
+        self.last_status = last_status
+        self.detail = detail
+        self.reason = reason
+        outcome = f"HTTP {last_status}" if last_status is not None else "no response"
+        sent = "sent to the seller" if attempts == 1 else f"sent to the seller {attempts} times"
+        price = f"{self.amount} " if self.amount else ""
+        super().__init__(
+            f"Payment not confirmed: one {price}payment authorization was {sent}, and the "
+            f"seller did not confirm it (last result: {outcome}). It may still settle."
+        )
+
+    def to_tool_result(self, guidance: str) -> dict:
+        """A tool result the model cannot mistake for "payment required"."""
+        result = {
+            "error": str(self),
+            "paymentStatus": "unconfirmed",
+            "paymentAttempted": True,
+            "network": self.network,
+            "amount": self.amount,
+            "sellerResponse": self.detail,
+            "guidance": guidance,
+        }
+        if self.reason:
+            result["sellerReason"] = self.reason
+        return result
+
+
+def _not_confirmed(url: str, accept: dict, attempts: int, resp: _requests.Response | None = None,
+                   error: BaseException | None = None) -> PaymentNotConfirmed:
+    """Log and build the PaymentNotConfirmed for a signed request."""
+    if resp is not None:
+        req = _parse_payment_required(resp) if resp.status_code == 402 else None
+        reason = req.get("error") if isinstance(req, dict) else None
+        exc = PaymentNotConfirmed(url, accept, attempts, resp.status_code, resp.text[:200],
+                                  str(reason)[:200] if reason else "")
+        _logger.warning("Signed payment not confirmed by %s after %d attempt(s): status %d",
+                        url, attempts, resp.status_code)
+    else:
+        exc = PaymentNotConfirmed(url, accept, attempts, None, type(error).__name__)
+        _logger.warning("Signed payment not confirmed by %s after %d attempt(s): %s",
+                        url, attempts, type(error).__name__)
+    return exc
+
+
+def _seller_error_body(resp: _requests.Response) -> bool:
+    """True when the body is the seller's own JSON error, not a gateway's."""
+    try:
+        data = resp.json()
+    except Exception:
+        return False
+    return isinstance(data, dict) and "x402_content" in data
+
+
+def _outcome_unknown(resp: _requests.Response, settles_only_on_success: bool) -> bool:
+    """Whether a seller's answer to a signed request leaves the payment's fate unknown."""
+    if resp.status_code == 402:
+        return True
+    if resp.status_code >= 500:
+        # A seller that settles only after its handler succeeds (the @x402/hono
+        # middleware skips settlement for any status >= 400) never charges for
+        # its own error response. A gateway timeout or crash is still unknown:
+        # the handler may have succeeded and settled after the gateway gave up.
+        return not (settles_only_on_success and _seller_error_body(resp))
+    return False
+
+
 def _pay_and_retry(
     url: str,
     method: str = "POST",
     body: Any = None,
     extra_headers: dict | None = None,
     timeout: int = 30,
+    settles_only_on_success: bool = False,
 ) -> _requests.Response:
     """Call an HTTP endpoint. If 402, ProcessPayment → retry with X-PAYMENT.
 
-    Returns the final response object (either the first 200 if no payment was
-    required, or the post-payment response). Raises on unrecoverable errors so
-    callers can translate them into structured tool results.
+    Returns the final response object: the first response if no payment was
+    required, or the seller's answer to the signed request. Raises on
+    unrecoverable errors so callers can translate them into structured tool
+    results. Once a payment has been signed, an outcome that leaves its fate
+    unknown (402 on every attempt, a 5xx, or a connection error) raises
+    ``PaymentNotConfirmed`` rather than returning a response that reads like
+    "not paid". A 4xx other than 402 is returned as-is: the seller rejected the
+    request itself (bad input, unknown product, out of stock) before payment,
+    unless an earlier attempt got a 402, whose outcome is still open.
+
+    ``settles_only_on_success``: the seller settles only after its handler
+    succeeds, so a 5xx carrying its own error body means nothing was charged.
     """
     creds = _payment_creds
     if not creds.get("payment_manager_arn") or not creds.get("instrument_id") or not creds.get("session_id"):
@@ -357,13 +521,21 @@ def _pay_and_retry(
     retry_headers["Payment-Signature"] = encoded_sig
 
     # Retry with backoff — the previous on-chain tx may still be settling
-    # and the facilitator rejects until the nonce clears.
+    # and the facilitator rejects until the nonce clears. Every attempt
+    # re-presents the SAME signed proof; nothing here signs a second payment.
     backoffs = [2, 3, 5, 8, 10]
     max_attempts = len(backoffs)
+    saw_402 = False
     for attempt in range(max_attempts):
-        resp = _send(retry_headers)
+        try:
+            resp = _send(retry_headers)
+        except Exception as exc:
+            if attempt == 0 and isinstance(exc, _requests.ConnectTimeout):
+                raise RuntimeError(_PAYMENT_NOT_SENT) from exc
+            raise _not_confirmed(url, selected, attempt + 1, error=exc) from exc
         if resp.status_code != 402:
             break
+        saw_402 = True
         if attempt < max_attempts - 1:
             wait = backoffs[attempt]
             _logger.info(
@@ -371,6 +543,9 @@ def _pay_and_retry(
                 attempt + 1, wait,
             )
             _time.sleep(wait)
+
+    if _outcome_unknown(resp, settles_only_on_success) or (saw_402 and not 200 <= resp.status_code < 300):
+        raise _not_confirmed(url, selected, attempt + 1, resp=resp)
 
     return resp
 
@@ -544,7 +719,7 @@ def _send_request(url, method, body, headers, timeout):
     )
 
 
-def _paid_request(url, method="POST", body=None, headers=None, timeout=60):
+def _paid_request(url, method="POST", body=None, headers=None, timeout=60, settles_only_on_success=False):
     """Perform an x402-paid request, routed through the plugin when it's active.
 
     Returns a (kind, value) tuple:
@@ -557,21 +732,39 @@ def _paid_request(url, method="POST", body=None, headers=None, timeout=60):
         error). Reached either because the call was free, the plugin already
         injected a payment header (re-invocation), or the plugin is inactive and
         the in-process ``_pay_and_retry`` fallback handled the 402.
+
+    Raises ``PaymentNotConfirmed`` on either path once a payment has been
+    signed and the seller's answer leaves its fate unknown (402, 5xx, or no
+    response), so the tool never reports it as "not paid".
     """
     headers = dict(headers or {})
 
     if _PLUGIN_ACTIVE:
-        resp = _send_request(url, method, body, headers, timeout)
+        signed = _has_payment_header(headers)
+        try:
+            resp = _send_request(url, method, body, headers, timeout)
+        except Exception as exc:
+            if not signed:
+                raise
+            if isinstance(exc, _requests.ConnectTimeout):
+                raise RuntimeError(_PAYMENT_NOT_SENT) from exc
+            raise _not_confirmed(url, _accept_from_payment_header(headers), 1, error=exc) from exc
         # First pass with no signed header and a 402 → hand off to the plugin.
-        if resp.status_code == 402 and not _has_payment_header(headers):
+        if resp.status_code == 402 and not signed:
             raw_header = resp.headers.get("payment-required") or resp.headers.get("Payment-Required") or ""
             requirements = _parse_payment_required(resp)
             if requirements or raw_header:
                 return ("marker", _payment_required_marker(requirements or {}, raw_header))
+        # Re-invocation with the plugin's signed proof: same rule as the
+        # fallback. A 402 or 5xx here doesn't mean "not paid", and returning it
+        # as an ordinary error invites a retry that signs a second payment.
+        if signed and _outcome_unknown(resp, settles_only_on_success):
+            raise _not_confirmed(url, _accept_from_payment_header(headers), 1, resp=resp)
         return ("response", resp)
 
     # Plugin inactive (voice / disabled): in-process x402 dance.
-    resp = _pay_and_retry(url, method=method, body=body, extra_headers=headers, timeout=timeout)
+    resp = _pay_and_retry(url, method=method, body=body, extra_headers=headers, timeout=timeout,
+                          settles_only_on_success=settles_only_on_success)
     return ("response", resp)
 
 
@@ -690,7 +883,12 @@ def strands_generate_image(prompt: str, headers: dict | None = None) -> str:
         return json.dumps({"error": "SELLER_API_URL not configured"})
     url = f"{SELLER_API_URL.rstrip('/')}/image-gen"
     try:
-        kind, value = _paid_request(url, method="POST", body={"prompt": prompt}, headers=headers, timeout=60)
+        # The image seller's @x402/hono middleware settles only after the
+        # handler succeeds, so its own error responses were never charged.
+        kind, value = _paid_request(url, method="POST", body={"prompt": prompt}, headers=headers, timeout=60,
+                                    settles_only_on_success=True)
+    except PaymentNotConfirmed as e:
+        return json.dumps(e.to_tool_result(UNCONFIRMED_GUIDANCE["generate_image"]))
     except Exception as e:
         _logger.error("Image generation payment error: %s", type(e).__name__)
         return json.dumps({"error": _translate_payment_error(e)})
@@ -778,6 +976,8 @@ def strands_buy_product(product_id: str, quantity: int = 1, shipping_address: st
         body["shippingAddress"] = shipping_address
     try:
         kind, value = _paid_request(url, method="POST", body=body, headers=headers, timeout=60)
+    except PaymentNotConfirmed as e:
+        return json.dumps(e.to_tool_result(UNCONFIRMED_GUIDANCE["buy_product"]))
     except Exception as e:
         _logger.error("Buy product error: %s", type(e).__name__)
         return json.dumps({"error": _translate_payment_error(e)})
