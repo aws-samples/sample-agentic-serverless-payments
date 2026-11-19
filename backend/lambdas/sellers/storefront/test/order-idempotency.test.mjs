@@ -1,26 +1,28 @@
-// Storefront order idempotency: one x402 payment can create at most one order.
-//
-// Runs the real order service (orders.mjs, shared.mjs, x402.mjs and the
-// @x402/* resource server) against DynamoDB Local, with a small in-process x402
-// facilitator standing in for the network one. Nothing in the order path is
-// mocked, so the conditional writes are checked against real DynamoDB semantics.
-//
-//   docker run --rm -p 8000:8000 amazon/dynamodb-local
-//   cd backend/lambdas/sellers/storefront && npm ci && cd -
-//   AWS_ENDPOINT_URL_DYNAMODB=http://localhost:8000 npm run test:storefront
-//
-// Without AWS_ENDPOINT_URL_DYNAMODB the DynamoDB-backed tests are skipped; the
-// pure idempotency-key tests always run.
-
+/**
+ * Storefront order idempotency: one x402 payment can create at most one order.
+ *
+ *   npm test        (from backend/lambdas/sellers/storefront)
+ *
+ * Runs the real order service (orders.mjs, shared.mjs, x402.mjs and the
+ * @x402/* resource server), with a small in-process x402 facilitator standing
+ * in for the network one. Nothing in the order path is mocked.
+ *
+ * By default DynamoDB is the in-memory fake (fake-dynamodb.mjs). Point the
+ * suite at DynamoDB Local to check the same conditional writes against the
+ * real service:
+ *
+ *   docker run --rm -p 8000:8000 amazon/dynamodb-local
+ *   AWS_ENDPOINT_URL_DYNAMODB=http://localhost:8000 npm test
+ */
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 import crypto from "node:crypto";
-import { createRequire } from "node:module";
+import { DynamoDBClient, CreateTableCommand, DeleteTableCommand } from "@aws-sdk/client-dynamodb";
+import { DynamoDBDocumentClient, GetCommand, PutCommand, ScanCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 
-const STOREFRONT = new URL("../../lambdas/sellers/storefront/", import.meta.url);
-const requireFromStorefront = createRequire(new URL("package.json", STOREFRONT));
 const ddbEndpoint = process.env.AWS_ENDPOINT_URL_DYNAMODB;
+const BACKEND = ddbEndpoint ? "DynamoDB Local" : "in-memory DynamoDB";
 
 // ── Test configuration (must be set before the order service is imported) ──
 const suffix = crypto.randomBytes(4).toString("hex");
@@ -99,12 +101,18 @@ await new Promise((r) => facilitatorServer.listen(0, "127.0.0.1", r));
 process.env.X402_FACILITATOR_URL = `http://127.0.0.1:${facilitatorServer.address().port}`;
 after(() => facilitatorServer.close());
 
+if (!ddbEndpoint) {
+  const { installFakeDynamoDB } = await import("./fake-dynamodb.mjs");
+  installFakeDynamoDB();
+}
+
 // The order service reads its configuration at import time, so import it last.
-const { paymentIdempotencyKey } = await import(new URL("x402.mjs", STOREFRONT));
-const { handler } = await import(new URL("orders.mjs", STOREFRONT));
+const { paymentIdempotencyKey } = await import("../x402.mjs");
+const { handler } = await import("../orders.mjs");
 
 // ── Helpers ──
-let doc, ddb;
+const ddb = new DynamoDBClient({ region: process.env.AWS_REGION });
+const doc = DynamoDBDocumentClient.from(ddb);
 
 const BUYER_USER_ID = "buyer-user";
 const orderEvent = (paymentHeader, userId) => ({
@@ -140,7 +148,7 @@ async function makeProof({ from = BUYER_A, nonce = `0x${crypto.randomBytes(32).t
 }
 
 async function setInventory(n) {
-  await doc.send(new doc.UpdateCommand({
+  await doc.send(new UpdateCommand({
     TableName: TABLES.PRODUCTS_TABLE,
     Key: { productId: PRODUCT_ID },
     UpdateExpression: "SET inventory = :n",
@@ -148,9 +156,9 @@ async function setInventory(n) {
   }));
 }
 const inventory = async () =>
-  (await doc.send(new doc.GetCommand({ TableName: TABLES.PRODUCTS_TABLE, Key: { productId: PRODUCT_ID } }))).Item.inventory;
+  (await doc.send(new GetCommand({ TableName: TABLES.PRODUCTS_TABLE, Key: { productId: PRODUCT_ID } }))).Item.inventory;
 const orders = async () =>
-  (await doc.send(new doc.ScanCommand({ TableName: TABLES.ORDERS_TABLE }))).Items;
+  (await doc.send(new ScanCommand({ TableName: TABLES.ORDERS_TABLE }))).Items;
 
 // ── Pure key derivation (no DynamoDB needed) ──
 describe("paymentIdempotencyKey", () => {
@@ -211,34 +219,32 @@ describe("paymentIdempotencyKey", () => {
 });
 
 // ── Order flow against DynamoDB Local ──
-describe("POST /orders idempotency (DynamoDB Local)", { skip: !ddbEndpoint && "set AWS_ENDPOINT_URL_DYNAMODB to run" }, () => {
+describe(`POST /orders idempotency (${BACKEND})`, () => {
   before(async () => {
-    const { DynamoDBClient, CreateTableCommand } = requireFromStorefront("@aws-sdk/client-dynamodb");
-    const lib = requireFromStorefront("@aws-sdk/lib-dynamodb");
-    ddb = new DynamoDBClient({ region: process.env.AWS_REGION });
-    doc = Object.assign(lib.DynamoDBDocumentClient.from(ddb), lib);
-    const keys = { PRODUCTS_TABLE: "productId", ORDERS_TABLE: "orderId", SELLER_CONFIG_TABLE: "pk", IDEMPOTENCY_TABLE: "idempotencyKey" };
-    for (const [env, key] of Object.entries(keys)) {
-      await ddb.send(new CreateTableCommand({
-        TableName: TABLES[env],
-        AttributeDefinitions: [{ AttributeName: key, AttributeType: "S" }],
-        KeySchema: [{ AttributeName: key, KeyType: "HASH" }],
-        BillingMode: "PAY_PER_REQUEST",
-      }));
+    // The in-memory fake creates tables on first use; DynamoDB Local needs them.
+    if (ddbEndpoint) {
+      const keys = { PRODUCTS_TABLE: "productId", ORDERS_TABLE: "orderId", SELLER_CONFIG_TABLE: "pk", IDEMPOTENCY_TABLE: "idempotencyKey" };
+      for (const [env, key] of Object.entries(keys)) {
+        await ddb.send(new CreateTableCommand({
+          TableName: TABLES[env],
+          AttributeDefinitions: [{ AttributeName: key, AttributeType: "S" }],
+          KeySchema: [{ AttributeName: key, KeyType: "HASH" }],
+          BillingMode: "PAY_PER_REQUEST",
+        }));
+      }
     }
-    await doc.send(new doc.PutCommand({
+    await doc.send(new PutCommand({
       TableName: TABLES.SELLER_CONFIG_TABLE,
       Item: { pk: "SELLER#default", status: "READY", evmPayToAddress: SELLER_EVM },
     }));
-    await doc.send(new doc.PutCommand({
+    await doc.send(new PutCommand({
       TableName: TABLES.PRODUCTS_TABLE,
       Item: { productId: PRODUCT_ID, name: "Dataset license", priceUsd: 1, inventory: 10, active: true, fulfillmentType: "digital", deliveryKind: "license" },
     }));
   });
 
   after(async () => {
-    if (!ddb) return;
-    const { DeleteTableCommand } = requireFromStorefront("@aws-sdk/client-dynamodb");
+    if (!ddbEndpoint) return;
     for (const name of Object.values(TABLES)) await ddb.send(new DeleteTableCommand({ TableName: name })).catch(() => {});
   });
 
@@ -344,7 +350,7 @@ describe("POST /orders idempotency (DynamoDB Local)", { skip: !ddbEndpoint && "s
     const p = JSON.parse(Buffer.from(proof, "base64").toString());
     return paymentIdempotencyKey(p, p.accepted);
   };
-  const putRecord = (proof, item) => doc.send(new doc.PutCommand({
+  const putRecord = (proof, item) => doc.send(new PutCommand({
     TableName: TABLES.IDEMPOTENCY_TABLE,
     Item: { idempotencyKey: keyFor(proof), ...item },
   }));

@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "type": "module",
   "description": "Agent-economy storefront — x402 order service, products, seller setup, and seller-originated refunds",
+  "scripts": {
+    "test": "node --test --experimental-test-module-mocks \"test/*.test.mjs\""
+  },
   "dependencies": {
     "@aws-sdk/client-dynamodb": "3.1060.0",
     "@aws-sdk/lib-dynamodb": "3.1060.0",

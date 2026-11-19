@@ -823,13 +823,15 @@ def send_response(event, context, status, data):
       PAYMENTS_AGENT_NAME: process.env.PAYMENTS_AGENT_NAME || "agentcore-payments-agent",
     };
     const storefrontDir = path.join(lambdasDir, "sellers", "storefront");
+    // One bundle for every storefront function; the unit tests stay out of it.
+    const storefrontCode = lambda.Code.fromAsset(storefrontDir, { exclude: ["test/**"] });
 
     // Product service — public read, DB read only.
     const productFn = new lambda.Function(this, "ProductFn", {
       functionName: "x402-storefront-products",
       runtime: lambda.Runtime.NODEJS_22_X,
       architecture: lambda.Architecture.ARM_64,
-      code: lambda.Code.fromAsset(storefrontDir),
+      code: storefrontCode,
       handler: "products.handler",
       environment: storefrontEnv,
       timeout: cdk.Duration.seconds(15),
@@ -872,7 +874,7 @@ def send_response(event, context, status, data):
       functionName: "x402-storefront-orders",
       runtime: lambda.Runtime.NODEJS_22_X,
       architecture: lambda.Architecture.ARM_64,
-      code: lambda.Code.fromAsset(storefrontDir),
+      code: storefrontCode,
       handler: "orders.handler",
       role: orderRole,
       environment: storefrontEnv,
@@ -935,7 +937,7 @@ def send_response(event, context, status, data):
       functionName: "x402-storefront-seller-setup",
       runtime: lambda.Runtime.NODEJS_22_X,
       architecture: lambda.Architecture.ARM_64,
-      code: lambda.Code.fromAsset(storefrontDir),
+      code: storefrontCode,
       handler: "seller-setup.handler",
       role: sellerSetupRole,
       environment: { ...storefrontEnv, SELLER_MANAGER_ROLE_ARN: sellerManagerRole.roleArn },
@@ -964,7 +966,7 @@ def send_response(event, context, status, data):
       functionName: "x402-storefront-library",
       runtime: lambda.Runtime.NODEJS_22_X,
       architecture: lambda.Architecture.ARM_64,
-      code: lambda.Code.fromAsset(storefrontDir),
+      code: storefrontCode,
       handler: "library.handler",
       role: libraryRole,
       environment: storefrontEnv,
@@ -1024,7 +1026,7 @@ def send_response(event, context, status, data):
       functionName: "x402-storefront-seed",
       runtime: lambda.Runtime.NODEJS_22_X,
       architecture: lambda.Architecture.ARM_64,
-      code: lambda.Code.fromAsset(storefrontDir),
+      code: storefrontCode,
       handler: "seed.handler",
       environment: storefrontEnv,
       timeout: cdk.Duration.minutes(2),
