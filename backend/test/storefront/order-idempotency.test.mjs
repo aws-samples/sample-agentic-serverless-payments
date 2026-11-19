@@ -180,13 +180,33 @@ describe("paymentIdempotencyKey", () => {
     assert.notEqual(paymentIdempotencyKey(permit2(BUYER_A, "7"), reqs), paymentIdempotencyKey(permit2(BUYER_B, "7"), reqs));
   });
 
-  test("hashes the whole Solana transaction, so proofs sharing a prefix do not collide", () => {
-    const sol = { network: "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1", asset: "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU" };
-    const prefix = "A".repeat(200);
-    assert.notEqual(
-      paymentIdempotencyKey({ payload: { transaction: `${prefix}1` } }, sol),
-      paymentIdempotencyKey({ payload: { transaction: `${prefix}2` } }, sol),
-    );
+  // Minimal legacy Solana transaction: 1 signature, then a message with header
+  // [1 signer, 0, 0], one account key, a recent blockhash and no instructions.
+  const sol = { network: "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1", asset: "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU" };
+  const solTx = ({ sigByte = 1, blockhashByte = 3 } = {}) => Buffer.concat([
+    Buffer.from([1]), Buffer.alloc(64, sigByte),
+    Buffer.from([1, 0, 0, 1]), Buffer.alloc(32, 2), Buffer.alloc(32, blockhashByte), Buffer.from([0]),
+  ]).toString("base64");
+  const solKey = (b64) => paymentIdempotencyKey({ payload: { transaction: b64 } }, sol);
+
+  test("keys a Solana proof on its message, not on how the transaction is spelled", () => {
+    const canonical = solTx();
+    assert.match(canonical, /=$/, "fixture must need padding");
+    const unpadded = canonical.replace(/=+$/, "");
+    const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const spareBitFlipped = unpadded.slice(0, -1) + alphabet[alphabet.indexOf(unpadded.at(-1)) ^ 1];
+    const resigned = solTx({ sigByte: 9 });
+
+    for (const variant of [unpadded, spareBitFlipped, resigned]) {
+      assert.equal(solKey(variant), solKey(canonical));
+    }
+  });
+
+  test("distinct Solana payments get distinct keys even when their base64 shares a long prefix", () => {
+    const a = solTx({ blockhashByte: 3 });
+    const b = solTx({ blockhashByte: 4 });
+    assert.equal(a.slice(0, 120), b.slice(0, 120));
+    assert.notEqual(solKey(a), solKey(b));
   });
 });
 

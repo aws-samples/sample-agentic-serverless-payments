@@ -225,8 +225,12 @@ async function placeOrder(event) {
     return json({ error: "Payment settlement failed", orderId }, 402);
   }
   // Funds moved: the proof is spent. Record that before fulfillment so a
-  // retry from here on resolves to this order.
-  await completeIdempotencyKey(idempotencyKey, orderId);
+  // retry from here on resolves to this order. Best-effort: if the write fails,
+  // the claim's lease still blocks duplicates until the proof can no longer
+  // verify, and a paid order must not go unfulfilled over bookkeeping.
+  await completeIdempotencyKey(idempotencyKey, orderId).catch((e) => {
+    console.error(JSON.stringify({ event: "idempotency_complete_failed", orderId, error: e?.name }));
+  });
 
   const tx = settle.body?.transaction || settle.body?.txHash || "";
 

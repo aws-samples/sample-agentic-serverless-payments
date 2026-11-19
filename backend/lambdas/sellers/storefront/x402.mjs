@@ -284,7 +284,7 @@ export function buyerAddressFromPayload(paymentPayload) {
  * most one of them can settle.
  *   EIP-3009  the token contract records each (authorizer, nonce) once
  *   Permit2   the Permit2 contract records each (owner, nonce) once
- *   Solana    the signed transaction can land once
+ *   Solana    the signed message can land once (see solanaMessageDigest)
  * Any other shape falls back to the signed payload itself. Returns a hex sha256.
  */
 export function paymentIdempotencyKey(paymentPayload, paymentRequirements) {
@@ -293,7 +293,7 @@ export function paymentIdempotencyKey(paymentPayload, paymentRequirements) {
   const lower = (v) => String(v || "").toLowerCase();
   let parts;
   if (typeof p.transaction === "string" && p.transaction) {
-    parts = ["svm", network, p.transaction];
+    parts = ["svm", network, solanaMessageDigest(p.transaction) || p.transaction];
   } else if (p.authorization?.nonce) {
     parts = ["eip3009", network, lower(paymentRequirements?.asset), lower(p.authorization.from), lower(p.authorization.nonce)];
   } else if (p.permit2Authorization?.nonce) {
@@ -302,6 +302,23 @@ export function paymentIdempotencyKey(paymentPayload, paymentRequirements) {
     parts = ["payload", network, JSON.stringify(p)];
   }
   return crypto.createHash("sha256").update(parts.join("|")).digest("hex");
+}
+
+/**
+ * sha256 of a Solana proof's message bytes, or "" if the proof doesn't decode.
+ * The base64 string itself isn't a stable identity: the decoder accepts it
+ * unpadded and ignores spare trailing bits, and the payer can re-sign the same
+ * message, so different strings can carry one payment. The message bytes are
+ * what the transaction id (the fee payer's signature) and the facilitator's
+ * own settlement de-duplication are derived from.
+ */
+function solanaMessageDigest(base64Tx) {
+  try {
+    const tx = getTransactionDecoder().decode(getBase64Encoder().encode(base64Tx));
+    return crypto.createHash("sha256").update(tx.messageBytes).digest("hex");
+  } catch {
+    return "";
+  }
 }
 
 /**
