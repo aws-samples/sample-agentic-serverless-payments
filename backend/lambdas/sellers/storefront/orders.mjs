@@ -384,6 +384,24 @@ async function updateOrder(orderId, event) {
 }
 
 // ── Refund: seller-originated reverse payment, governed by a capped session ──
+
+// Why an order cannot be refunded right now (a 409 response), or null if it can.
+function refundConflict(order, forced) {
+  if (order.status === "REFUNDED") return json({ error: "Order already refunded", order }, 409);
+  if (order.status === "REFUNDING") return json({ error: "A refund for this order is already in progress" }, 409);
+  if (order.status !== "CONFIRMED") {
+    return json({ error: `Only CONFIRMED orders can be refunded (status: ${order.status})` }, 409);
+  }
+  if (order.downloaded === true && !forced) {
+    return json({
+      error: "This order was already downloaded and is no longer refundable.",
+      downloaded: true,
+      forceRefundable: true,
+    }, 409);
+  }
+  return null;
+}
+
 // ``opts.allowForce`` is true only on the authed admin route. The public agent
 // path can refund a normal (not-downloaded) order but can never force.
 async function refundOrder(orderId, event, opts = {}) {
@@ -395,10 +413,6 @@ async function refundOrder(orderId, event, opts = {}) {
 
   const order = await getOrder(orderId);
   if (!order) return json({ error: "Order not found" }, 404);
-  if (order.status === "REFUNDED") return json({ error: "Order already refunded", order }, 409);
-  if (order.status !== "CONFIRMED") {
-    return json({ error: `Only CONFIRMED orders can be refunded (status: ${order.status})` }, 409);
-  }
   // Downloaded digital goods are non-refundable via the self-serve / agent
   // path. An admin can still override with force=true (e.g. a support case),
   // which we record on the order for the audit trail.
@@ -408,13 +422,8 @@ async function refundOrder(orderId, event, opts = {}) {
   // allowForce is false, so a forced flag in the body is ignored — the agent
   // can never override the downloaded-is-final rule.
   const forced = allowForce && (refundBody.force === true || refundBody.force === "true");
-  if (order.downloaded === true && !forced) {
-    return json({
-      error: "This order was already downloaded and is no longer refundable.",
-      downloaded: true,
-      forceRefundable: true,
-    }, 409);
-  }
+  const conflict = refundConflict(order, forced);
+  if (conflict) return conflict;
   if (!order.buyerWalletAddress) {
     return json({ error: "No buyer wallet address on order — cannot refund" }, 422);
   }
@@ -432,13 +441,10 @@ async function refundOrder(orderId, event, opts = {}) {
     refundStartedAt: new Date().toISOString(),
   }, { status: "CONFIRMED", notDownloaded: !forced });
   if (!claimed) {
+    // Another request changed the order between the read above and the claim.
     const current = await getOrder(orderId);
-    if (current?.status === "REFUNDED") return json({ error: "Order already refunded", order: current }, 409);
-    if (current?.status === "REFUNDING") return json({ error: "A refund for this order is already in progress" }, 409);
-    if (current?.downloaded === true) {
-      return json({ error: "This order was already downloaded and is no longer refundable.", downloaded: true, forceRefundable: true }, 409);
-    }
-    return json({ error: `Only CONFIRMED orders can be refunded (status: ${current?.status})` }, 409);
+    return (current && refundConflict(current, forced))
+      || json({ error: "The order changed while the refund was starting. Try again.", retryable: true }, 409);
   }
 
   // Outbound payment: seller → buyer, on the order's network, governed by a
@@ -454,7 +460,7 @@ async function refundOrder(orderId, event, opts = {}) {
   });
 
   // Only mark REFUNDED when the on-chain settle actually succeeded. Otherwise
-  // the funds never moved — return the order to CONFIRMED so it can be retried
+  // the funds never moved, so return the order to CONFIRMED so it can be retried
   // and report the real reason. (If this invocation dies mid-payout the order
   // stays REFUNDING: the safe state when it is unknown whether funds moved.)
   if (!payout.ok) {
