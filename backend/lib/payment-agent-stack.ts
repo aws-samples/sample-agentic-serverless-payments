@@ -735,6 +735,16 @@ def send_response(event, context, status, data):
       indexName: "buyerUserId-index",
       partitionKey: { name: "buyerUserId", type: dynamodb.AttributeType.STRING },
     });
+    // Payment-proof idempotency keys: one x402 proof yields at most one order.
+    // Short-lived records, expired by DynamoDB TTL.
+    const idempotencyTable = new dynamodb.Table(this, "IdempotencyTable", {
+      tableName: "StorefrontIdempotency",
+      partitionKey: { name: "idempotencyKey", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      timeToLiveAttribute: "expiresAt",
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
 
     // ── Seller PaymentManager service role (assumed by AgentCore for the
     //    seller's payout manager — mirrors the buyer-side manager role) ──
@@ -794,6 +804,7 @@ def send_response(event, context, status, data):
     const storefrontEnv = {
       PRODUCTS_TABLE: productsTable.tableName,
       ORDERS_TABLE: ordersTable.tableName,
+      IDEMPOTENCY_TABLE: idempotencyTable.tableName,
       SELLER_CONFIG_TABLE: sellerConfigTable.tableName,
       USDC_CONTRACT: process.env.USDC_CONTRACT || "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
       SOLANA_USDC_MINT: process.env.SOLANA_USDC_MINT || "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
@@ -812,13 +823,15 @@ def send_response(event, context, status, data):
       PAYMENTS_AGENT_NAME: process.env.PAYMENTS_AGENT_NAME || "agentcore-payments-agent",
     };
     const storefrontDir = path.join(lambdasDir, "sellers", "storefront");
+    // One bundle for every storefront function; the unit tests stay out of it.
+    const storefrontCode = lambda.Code.fromAsset(storefrontDir, { exclude: ["test/**"] });
 
     // Product service — public read, DB read only.
     const productFn = new lambda.Function(this, "ProductFn", {
       functionName: "x402-storefront-products",
       runtime: lambda.Runtime.NODEJS_22_X,
       architecture: lambda.Architecture.ARM_64,
-      code: lambda.Code.fromAsset(storefrontDir),
+      code: storefrontCode,
       handler: "products.handler",
       environment: storefrontEnv,
       timeout: cdk.Duration.seconds(15),
@@ -861,7 +874,7 @@ def send_response(event, context, status, data):
       functionName: "x402-storefront-orders",
       runtime: lambda.Runtime.NODEJS_22_X,
       architecture: lambda.Architecture.ARM_64,
-      code: lambda.Code.fromAsset(storefrontDir),
+      code: storefrontCode,
       handler: "orders.handler",
       role: orderRole,
       environment: storefrontEnv,
@@ -870,6 +883,8 @@ def send_response(event, context, status, data):
     });
     productsTable.grantReadWriteData(orderFn);
     ordersTable.grantReadWriteData(orderFn);
+    // Only the item operations the idempotency helpers in shared.mjs use.
+    idempotencyTable.grant(orderFn, "dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem");
     sellerConfigTable.grantReadData(orderFn);
 
     // Seller setup service — admin-triggered control-plane provisioning.
@@ -923,7 +938,7 @@ def send_response(event, context, status, data):
       functionName: "x402-storefront-seller-setup",
       runtime: lambda.Runtime.NODEJS_22_X,
       architecture: lambda.Architecture.ARM_64,
-      code: lambda.Code.fromAsset(storefrontDir),
+      code: storefrontCode,
       handler: "seller-setup.handler",
       role: sellerSetupRole,
       environment: { ...storefrontEnv, SELLER_MANAGER_ROLE_ARN: sellerManagerRole.roleArn },
@@ -952,7 +967,7 @@ def send_response(event, context, status, data):
       functionName: "x402-storefront-library",
       runtime: lambda.Runtime.NODEJS_22_X,
       architecture: lambda.Architecture.ARM_64,
-      code: lambda.Code.fromAsset(storefrontDir),
+      code: storefrontCode,
       handler: "library.handler",
       role: libraryRole,
       environment: storefrontEnv,
@@ -1012,7 +1027,7 @@ def send_response(event, context, status, data):
       functionName: "x402-storefront-seed",
       runtime: lambda.Runtime.NODEJS_22_X,
       architecture: lambda.Architecture.ARM_64,
-      code: lambda.Code.fromAsset(storefrontDir),
+      code: storefrontCode,
       handler: "seed.handler",
       environment: storefrontEnv,
       timeout: cdk.Duration.minutes(2),

@@ -17,6 +17,7 @@ import {
 } from "@aws-sdk/client-dynamodb";
 import {
   DynamoDBDocumentClient,
+  DeleteCommand,
   GetCommand,
   PutCommand,
   QueryCommand,
@@ -36,6 +37,7 @@ export const PRODUCTS_TABLE = process.env.PRODUCTS_TABLE || "";
 export const ORDERS_TABLE = process.env.ORDERS_TABLE || "";
 export const SELLER_CONFIG_TABLE = process.env.SELLER_CONFIG_TABLE || "";
 export const SELLER_CONFIG_PK = "SELLER#default";
+export const IDEMPOTENCY_TABLE = process.env.IDEMPOTENCY_TABLE || "";
 
 // Digital delivery buckets:
 //   ASSETS_BUCKET  — private store of the seller's deliverable files
@@ -175,6 +177,82 @@ export async function listOrdersByUser(userId, limit = 200) {
   } catch (e) {
     console.error("listOrdersByUser failed:", e?.message);
     return [];
+  }
+}
+
+// ── Payment-proof idempotency ──
+// One x402 proof authorizes one transfer, so it may produce at most one order.
+// POST /orders claims the proof's key (paymentIdempotencyKey) with a conditional
+// write before it reserves stock or settles. The record lifecycle follows the
+// Powertools for AWS Lambda idempotency model:
+//   IN_PROGRESS  claimed; the lease outlives the order function's 60s timeout,
+//                so a live invocation never loses its claim, and a crashed one
+//                frees the proof once the lease lapses
+//   COMPLETED    settled; points at the order
+//   (deleted)    failed before funds moved, so the proof may be retried
+// Keys live in their own table, never in the orders table: an order id is also
+// the refund and download capability, while proof fields such as the EIP-3009
+// nonce become public on-chain once the payment settles.
+const IDEMPOTENCY_LEASE_SECONDS = 120;
+const IDEMPOTENCY_TTL_SECONDS = 24 * 60 * 60; // far past any proof's validBefore
+
+// Returns true when this invocation now owns the key.
+export async function claimIdempotencyKey(key) {
+  const now = Math.floor(Date.now() / 1000);
+  try {
+    await ddb.send(new PutCommand({
+      TableName: IDEMPOTENCY_TABLE,
+      Item: {
+        idempotencyKey: key,
+        status: "IN_PROGRESS",
+        leaseExpiresAt: now + IDEMPOTENCY_LEASE_SECONDS,
+        expiresAt: now + IDEMPOTENCY_TTL_SECONDS,
+      },
+      // TTL deletion is lazy, so an expired record still counts as free.
+      ConditionExpression:
+        "attribute_not_exists(idempotencyKey) OR expiresAt < :now OR (#s = :inProgress AND leaseExpiresAt < :now)",
+      ExpressionAttributeNames: { "#s": "status" },
+      ExpressionAttributeValues: { ":now": now, ":inProgress": "IN_PROGRESS" },
+    }));
+    return true;
+  } catch (e) {
+    if (e.name === "ConditionalCheckFailedException") return false;
+    throw e;
+  }
+}
+
+export async function getIdempotencyRecord(key) {
+  const r = await ddb.send(new GetCommand({
+    TableName: IDEMPOTENCY_TABLE,
+    Key: { idempotencyKey: key },
+    ConsistentRead: true,
+  }));
+  return r.Item || null;
+}
+
+export async function completeIdempotencyKey(key, orderId) {
+  await ddb.send(new UpdateCommand({
+    TableName: IDEMPOTENCY_TABLE,
+    Key: { idempotencyKey: key },
+    UpdateExpression: "SET #s = :completed, orderId = :o REMOVE leaseExpiresAt",
+    ExpressionAttributeNames: { "#s": "status" },
+    ExpressionAttributeValues: { ":completed": "COMPLETED", ":o": orderId },
+  }));
+}
+
+// Frees a claim whose attempt failed before settlement. A COMPLETED record is
+// never released: once funds move, the proof is spent.
+export async function releaseIdempotencyKey(key) {
+  try {
+    await ddb.send(new DeleteCommand({
+      TableName: IDEMPOTENCY_TABLE,
+      Key: { idempotencyKey: key },
+      ConditionExpression: "#s = :inProgress",
+      ExpressionAttributeNames: { "#s": "status" },
+      ExpressionAttributeValues: { ":inProgress": "IN_PROGRESS" },
+    }));
+  } catch (e) {
+    if (e.name !== "ConditionalCheckFailedException") throw e;
   }
 }
 

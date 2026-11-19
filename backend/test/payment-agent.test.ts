@@ -25,11 +25,41 @@ describe("PaymentAgentStack", () => {
     template.resourceCountIs("AWS::ApiGatewayV2::Api", 3);
   });
 
-  test("provisions three DynamoDB tables with point-in-time recovery", () => {
-    template.resourceCountIs("AWS::DynamoDB::Table", 3);
+  test("provisions four DynamoDB tables with point-in-time recovery", () => {
+    template.resourceCountIs("AWS::DynamoDB::Table", 4);
     template.hasResourceProperties("AWS::DynamoDB::Table", {
       PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true },
     });
+  });
+
+  test("storefront idempotency table expires records by TTL", () => {
+    template.hasResourceProperties("AWS::DynamoDB::Table", {
+      TableName: "StorefrontIdempotency",
+      KeySchema: [{ AttributeName: "idempotencyKey", KeyType: "HASH" }],
+      TimeToLiveSpecification: { AttributeName: "expiresAt", Enabled: true },
+      PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true },
+    });
+  });
+
+  test("order function can use the idempotency table", () => {
+    template.hasResourceProperties("AWS::Lambda::Function", {
+      FunctionName: "x402-storefront-orders",
+      Environment: { Variables: Match.objectLike({ IDEMPOTENCY_TABLE: Match.anyValue() }) },
+    });
+  });
+
+  test("idempotency table access is limited to item reads and writes", () => {
+    const [tableId] = Object.keys(template.findResources("AWS::DynamoDB::Table", {
+      Properties: { TableName: "StorefrontIdempotency" },
+    }));
+    const statements = Object.values(template.findResources("AWS::IAM::Policy"))
+      .flatMap((p: any) => p.Properties.PolicyDocument.Statement)
+      .filter((s: any) => JSON.stringify(s.Resource).includes(tableId));
+    expect(statements).toHaveLength(1);
+    expect(statements[0].Effect).toBe("Allow");
+    expect([...statements[0].Action].sort()).toEqual([
+      "dynamodb:DeleteItem", "dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem",
+    ]);
   });
 
   test("creates the AgentCore runtime and memory", () => {
