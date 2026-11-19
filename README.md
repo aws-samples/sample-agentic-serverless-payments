@@ -491,6 +491,15 @@ Deploy:
 npm run cdk -- deploy
 ```
 
+Run the stack tests (`npm test`) and the storefront order tests. The order tests run the real order service against [DynamoDB Local](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/DynamoDBLocal.html) with an in-process x402 facilitator; without `AWS_ENDPOINT_URL_DYNAMODB` only the pure tests run:
+
+```bash
+npm test
+docker run --rm -d -p 8000:8000 amazon/dynamodb-local
+(cd lambdas/sellers/storefront && npm ci)
+AWS_ENDPOINT_URL_DYNAMODB=http://localhost:8000 npm run test:storefront
+```
+
 ### Project Structure
 
 ```
