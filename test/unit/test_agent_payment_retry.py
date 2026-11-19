@@ -1,4 +1,8 @@
-"""Unit tests for the payment agent's in-process x402 fallback (_pay_and_retry).
+"""Unit tests for how the payment agent reports a signed x402 payment.
+
+Covers the in-process fallback used in voice mode (_pay_and_retry) and the
+plugin path used in text and REST modes (_paid_request re-invoked with a
+signed header).
 
 Run from the repository root (needs only `requests` and `boto3`):
 
@@ -189,6 +193,115 @@ class PayAndRetryTest(unittest.TestCase):
         result = json.loads(tools.strands_buy_product("p1"))
 
         self.assertTrue(result["error"].startswith("Out of stock or conflict"))
+
+
+def signed_header(accept=ACCEPT):
+    """A PAYMENT-SIGNATURE header like the one the plugin injects on re-invocation."""
+    payload = {"x402Version": 2, "accepted": accept, "payload": {"signature": "0xsig"}}
+    return {"PAYMENT-SIGNATURE": base64.b64encode(json.dumps(payload).encode()).decode()}
+
+
+class PluginPathTest(unittest.TestCase):
+    """Text and REST modes: the AgentCorePaymentsPlugin signs, then re-invokes the
+    tool with a signed header. The tool sends it once; this checks how the
+    outcome of that signed request is reported."""
+
+    def setUp(self):
+        tools.set_plugin_active(True)
+        self.addCleanup(tools.set_plugin_active, False)
+        self.sent = []
+        self.responses = []
+
+        def post(url, json=None, data=None, headers=None, timeout=None):
+            self.sent.append(dict(headers or {}))
+            nxt = self.responses.pop(0)
+            if isinstance(nxt, Exception):
+                raise nxt
+            return nxt
+
+        session = mock.Mock()
+        session.post.side_effect = post
+        p = mock.patch.object(tools._requests, "Session", return_value=session)
+        p.start()
+        self.addCleanup(p.stop)
+
+    # ── Outcomes that leave a signed payment's fate unknown ──
+
+    def test_402_to_a_signed_request_raises_not_confirmed(self):
+        self.responses = [FakeResponse(402, {"error": "settlement failed"})]
+
+        with self.assertRaises(tools.PaymentNotConfirmed) as ctx:
+            tools._paid_request("https://storefront.example/orders", body={}, headers=signed_header())
+
+        err = ctx.exception
+        self.assertEqual((err.attempts, err.last_status), (1, 402))
+        self.assertEqual((err.network, err.amount), ("eip155:84532", "40000"))
+
+    def test_server_error_to_a_signed_request_raises_not_confirmed(self):
+        self.responses = [FakeResponse(504, {"message": "Endpoint request timed out"})]
+
+        with self.assertRaises(tools.PaymentNotConfirmed) as ctx:
+            tools._paid_request("https://storefront.example/orders", body={}, headers=signed_header())
+
+        self.assertEqual(ctx.exception.last_status, 504)
+
+    def test_connection_error_on_a_signed_request_raises_not_confirmed(self):
+        self.responses = [requests.ReadTimeout("read timed out")]
+
+        with self.assertRaises(tools.PaymentNotConfirmed) as ctx:
+            tools._paid_request("https://storefront.example/orders", body={}, headers=signed_header())
+
+        self.assertIsNone(ctx.exception.last_status)
+        self.assertIsInstance(ctx.exception.__cause__, requests.ReadTimeout)
+
+    def test_unreadable_signed_header_still_reports_unconfirmed(self):
+        self.responses = [FakeResponse(402)]
+
+        with self.assertRaises(tools.PaymentNotConfirmed) as ctx:
+            tools._paid_request("https://storefront.example/orders", body={}, headers={"PAYMENT-SIGNATURE": "not base64 json"})
+
+        self.assertEqual((ctx.exception.network, ctx.exception.amount), ("", ""))
+
+    # ── Outcomes whose meaning is unchanged ──
+
+    def test_first_402_without_a_signature_hands_off_to_the_plugin(self):
+        self.responses = [payment_required()]
+
+        kind, value = tools._paid_request("https://storefront.example/orders", body={})
+
+        self.assertEqual(kind, "marker")
+        self.assertTrue(value.startswith("PAYMENT_REQUIRED"))
+
+    def test_server_error_before_any_payment_is_returned_as_is(self):
+        self.responses = [FakeResponse(503)]
+
+        kind, resp = tools._paid_request("https://storefront.example/orders", body={})
+
+        self.assertEqual((kind, resp.status_code), ("response", 503))
+
+    def test_signed_success_and_client_errors_are_returned_as_is(self):
+        self.responses = [FakeResponse(201, {"order": {}}), FakeResponse(409, {"error": "Out of stock"})]
+
+        for status in (201, 409):
+            kind, resp = tools._paid_request("https://storefront.example/orders", body={}, headers=signed_header())
+            self.assertEqual((kind, resp.status_code), ("response", status))
+
+    # ── What the model sees ──
+
+    def test_buy_product_reports_an_unconfirmed_payment_on_re_invocation(self):
+        self.responses = [FakeResponse(402, {"error": "settlement failed"})]
+
+        result = json.loads(tools.strands_buy_product("p1", headers=signed_header()))
+
+        self.assertEqual(result["paymentStatus"], "unconfirmed")
+        self.assertIn("Do not retry", result["guidance"])
+
+    def test_generate_image_reports_an_unconfirmed_payment_on_re_invocation(self):
+        self.responses = [requests.ConnectionError("reset")]
+
+        result = json.loads(tools.strands_generate_image("a lighthouse at dusk", headers=signed_header()))
+
+        self.assertEqual(result["paymentStatus"], "unconfirmed")
 
 
 if __name__ == "__main__":

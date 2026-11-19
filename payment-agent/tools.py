@@ -151,6 +151,26 @@ def _has_payment_header(headers: dict | None) -> bool:
     return any(str(k).upper() in ("PAYMENT-SIGNATURE", "X-PAYMENT") for k in headers)
 
 
+def _accept_from_payment_header(headers: dict | None) -> dict:
+    """Best-effort payment terms from a signed PAYMENT-SIGNATURE / X-PAYMENT header.
+
+    v2 headers carry the accepted requirements; v1 headers carry only the
+    network. Returns {} when the header can't be decoded, so reporting an
+    unconfirmed payment never depends on parsing it.
+    """
+    for key, value in (headers or {}).items():
+        if str(key).upper() not in ("PAYMENT-SIGNATURE", "X-PAYMENT"):
+            continue
+        try:
+            padded = str(value) + "=" * ((4 - len(str(value)) % 4) % 4)
+            payload = json.loads(_b64.b64decode(padded).decode("utf-8"))
+            accepted = payload.get("accepted")
+            return accepted if isinstance(accepted, dict) else {"network": payload.get("network", "")}
+        except Exception:
+            return {}
+    return {}
+
+
 def _payment_required_marker(requirements: dict, raw_header: str = "") -> str:
     """Build the PAYMENT_REQUIRED marker the AgentCorePaymentsPlugin intercepts.
 
@@ -285,10 +305,11 @@ def _parse_payment_required(resp: _requests.Response) -> dict | None:
 class PaymentNotConfirmed(RuntimeError):
     """A signed payment was sent to the seller but never confirmed.
 
-    Raised by ``_pay_and_retry`` once ProcessPayment has produced a proof and
-    the seller has not answered with a success, because every attempt returned
-    402, the seller failed with a 5xx (for example a gateway timeout), or the
-    connection broke. The authorization stays valid until it expires, so the
+    Raised once a payment has been signed (by ``_pay_and_retry`` in voice mode,
+    or by the AgentCorePaymentsPlugin before it re-invokes the tool) and the
+    seller has not answered with a success: every attempt returned 402, the
+    seller failed with a 5xx (for example a gateway timeout), or the connection
+    broke. The authorization stays valid until it expires, so the
     payment may or may not settle. Callers must NOT report this as "not paid":
     an agent that reads a plain 402 as "pay" would sign a second payment for
     the same purchase.
@@ -615,17 +636,33 @@ def _paid_request(url, method="POST", body=None, headers=None, timeout=60):
         error). Reached either because the call was free, the plugin already
         injected a payment header (re-invocation), or the plugin is inactive and
         the in-process ``_pay_and_retry`` fallback handled the 402.
+
+    Raises ``PaymentNotConfirmed`` on either path once a payment has been
+    signed and the seller's answer leaves its fate unknown (402, 5xx, or no
+    response), so the tool never reports it as "not paid".
     """
     headers = dict(headers or {})
 
     if _PLUGIN_ACTIVE:
-        resp = _send_request(url, method, body, headers, timeout)
+        signed = _has_payment_header(headers)
+        try:
+            resp = _send_request(url, method, body, headers, timeout)
+        except _requests.RequestException as exc:
+            if signed:
+                raise PaymentNotConfirmed(url, _accept_from_payment_header(headers), 1, None, type(exc).__name__) from exc
+            raise
         # First pass with no signed header and a 402 → hand off to the plugin.
-        if resp.status_code == 402 and not _has_payment_header(headers):
+        if resp.status_code == 402 and not signed:
             raw_header = resp.headers.get("payment-required") or resp.headers.get("Payment-Required") or ""
             requirements = _parse_payment_required(resp)
             if requirements or raw_header:
                 return ("marker", _payment_required_marker(requirements or {}, raw_header))
+        # Re-invocation with the plugin's signed proof: same rule as the
+        # fallback. A 402 or 5xx here doesn't mean "not paid", and returning it
+        # as an ordinary error invites a retry that signs a second payment.
+        if signed and (resp.status_code == 402 or resp.status_code >= 500):
+            _logger.warning("Signed payment not confirmed by %s: status %d", url, resp.status_code)
+            raise PaymentNotConfirmed(url, _accept_from_payment_header(headers), 1, resp.status_code, resp.text[:200])
         return ("response", resp)
 
     # Plugin inactive (voice / disabled): in-process x402 dance.
