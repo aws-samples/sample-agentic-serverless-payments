@@ -282,6 +282,48 @@ def _parse_payment_required(resp: _requests.Response) -> dict | None:
         return None
 
 
+class PaymentNotConfirmed(RuntimeError):
+    """A signed payment was sent to the seller but never confirmed.
+
+    Raised by ``_pay_and_retry`` once ProcessPayment has produced a proof and
+    the seller has not answered with a success, because every attempt returned
+    402, the seller failed with a 5xx (for example a gateway timeout), or the
+    connection broke. The authorization stays valid until it expires, so the
+    payment may or may not settle. Callers must NOT report this as "not paid":
+    an agent that reads a plain 402 as "pay" would sign a second payment for
+    the same purchase.
+    """
+
+    def __init__(self, url: str, accept: dict, attempts: int, last_status: int | None, detail: str):
+        self.url = url
+        self.network = accept.get("network", "")
+        self.amount = str(accept.get("amount") or accept.get("maxAmountRequired") or "")
+        self.attempts = attempts
+        self.last_status = last_status
+        self.detail = detail
+        outcome = f"HTTP {last_status}" if last_status is not None else "no response"
+        super().__init__(
+            f"Payment sent but not confirmed: the signed payment was presented to the seller "
+            f"{attempts} time(s) and the last attempt ended with {outcome}. It may still settle."
+        )
+
+    def to_tool_result(self) -> dict:
+        """A tool result the model cannot mistake for "payment required"."""
+        return {
+            "error": str(self),
+            "paymentStatus": "unconfirmed",
+            "paymentAttempted": True,
+            "network": self.network,
+            "amount": self.amount,
+            "sellerResponse": self.detail,
+            "guidance": (
+                "Do not retry this purchase now: a retry signs a new payment. Tell the user "
+                "the payment was sent but not confirmed, then check list_orders or "
+                "check_balance before buying again."
+            ),
+        }
+
+
 def _pay_and_retry(
     url: str,
     method: str = "POST",
@@ -291,9 +333,14 @@ def _pay_and_retry(
 ) -> _requests.Response:
     """Call an HTTP endpoint. If 402, ProcessPayment → retry with X-PAYMENT.
 
-    Returns the final response object (either the first 200 if no payment was
-    required, or the post-payment response). Raises on unrecoverable errors so
-    callers can translate them into structured tool results.
+    Returns the final response object: the first response if no payment was
+    required, or the seller's answer to the signed request. Raises on
+    unrecoverable errors so callers can translate them into structured tool
+    results. Once a payment has been signed, an outcome that leaves its fate
+    unknown (402 on every attempt, a 5xx, or a connection error) raises
+    ``PaymentNotConfirmed`` rather than returning a response that reads like
+    "not paid". A 4xx other than 402 is returned as-is: the seller rejected the
+    request itself (bad input, unknown product, out of stock) before payment.
     """
     creds = _payment_creds
     if not creds.get("payment_manager_arn") or not creds.get("instrument_id") or not creds.get("session_id"):
@@ -357,11 +404,15 @@ def _pay_and_retry(
     retry_headers["Payment-Signature"] = encoded_sig
 
     # Retry with backoff — the previous on-chain tx may still be settling
-    # and the facilitator rejects until the nonce clears.
+    # and the facilitator rejects until the nonce clears. Every attempt
+    # re-presents the SAME signed proof; nothing here signs a second payment.
     backoffs = [2, 3, 5, 8, 10]
     max_attempts = len(backoffs)
     for attempt in range(max_attempts):
-        resp = _send(retry_headers)
+        try:
+            resp = _send(retry_headers)
+        except _requests.RequestException as exc:
+            raise PaymentNotConfirmed(url, selected, attempt + 1, None, type(exc).__name__) from exc
         if resp.status_code != 402:
             break
         if attempt < max_attempts - 1:
@@ -371,6 +422,13 @@ def _pay_and_retry(
                 attempt + 1, wait,
             )
             _time.sleep(wait)
+
+    if resp.status_code == 402 or resp.status_code >= 500:
+        _logger.warning(
+            "Signed payment not confirmed by %s after %d attempt(s): last status %d",
+            url, attempt + 1, resp.status_code,
+        )
+        raise PaymentNotConfirmed(url, selected, attempt + 1, resp.status_code, resp.text[:200])
 
     return resp
 
@@ -691,6 +749,8 @@ def strands_generate_image(prompt: str, headers: dict | None = None) -> str:
     url = f"{SELLER_API_URL.rstrip('/')}/image-gen"
     try:
         kind, value = _paid_request(url, method="POST", body={"prompt": prompt}, headers=headers, timeout=60)
+    except PaymentNotConfirmed as e:
+        return json.dumps(e.to_tool_result())
     except Exception as e:
         _logger.error("Image generation payment error: %s", type(e).__name__)
         return json.dumps({"error": _translate_payment_error(e)})
@@ -778,6 +838,8 @@ def strands_buy_product(product_id: str, quantity: int = 1, shipping_address: st
         body["shippingAddress"] = shipping_address
     try:
         kind, value = _paid_request(url, method="POST", body=body, headers=headers, timeout=60)
+    except PaymentNotConfirmed as e:
+        return json.dumps(e.to_tool_result())
     except Exception as e:
         _logger.error("Buy product error: %s", type(e).__name__)
         return json.dumps({"error": _translate_payment_error(e)})

@@ -449,6 +449,12 @@ curl -X POST http://localhost:8080/invocations \
   -d '{"prompt": "What is for sale in the storefront?", "userId": "test-user"}'
 ```
 
+Unit tests for the agent's in-process x402 payment fallback run from the repository root (they need only `requests` and `boto3`):
+
+```bash
+python -m unittest discover -s test/unit -v
+```
+
 ### Frontend Development
 
 Install dependencies and start the dev server:

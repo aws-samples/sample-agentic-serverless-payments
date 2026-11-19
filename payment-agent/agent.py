@@ -400,6 +400,9 @@ MULTIPLE PURCHASES IN ONE REQUEST:
 
 - If a tool returns an error, tell the user the SPECIFIC error (e.g. \
 "Payment session expired — create a new session" or "Out of stock").
+- If a paid tool returns paymentStatus "unconfirmed", a payment was already \
+sent and may still settle. Do NOT call that tool again for the same item. Tell \
+the user the payment is unconfirmed, then check list_orders or check_balance.
 - You CANNOT create sessions, instruments, or wallets. Direct users to the \
 Sessions or Instruments pages if these are missing.
 
