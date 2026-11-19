@@ -44,7 +44,7 @@ This solution shows how to build pay-per-use AI services with [Amazon Bedrock Ag
 
 **Agent-economy storefront (seller)**
 - Product catalog with atomic inventory (no overselling), seeded at deploy.
-- x402 orders with strict verify, reserve, settle, fulfil ordering and nonce idempotency, so goods ship only after settlement.
+- x402 orders with strict verify, reserve, settle, fulfil ordering, so goods ship only after settlement, and payment-proof idempotency, so a retried or concurrent duplicate proof never creates a second order.
 - Fulfilment by type: digital file (tracked, download-once, non-refundable after download), license token (HMAC-signed), and physical good (Amazon SES confirmation email with a graceful preview fallback).
 - Per-buyer Library and Orders history backed by Amazon S3 and Amazon DynamoDB.
 - An AgentCore-provisioned seller payout wallet shared by the storefront and the image generator.
@@ -128,7 +128,7 @@ The seller diagram has four panels. Each panel's numbered flow is below.
 1. **Browse.** `list_products` calls `GET /products` → the products Lambda → the catalog in Amazon DynamoDB (free, no payment).
 2. **Order and 402.** `buy_product` calls `POST /orders` without a proof → the orders Lambda returns HTTP 402 with the payTo from the seller config.
 3. **Pay.** The `AgentCorePaymentsPlugin` runs `ProcessPayment` from the buyer's session and retries `/orders` with the proof.
-4. **Verify, settle, fulfil.** The orders Lambda runs the order in strict order: verify the proof, reserve inventory atomically in DynamoDB, settle through the x402 facilitator, then fulfil by type: a digital file copied to the Amazon S3 library bucket (tracked download), a signed license token, or a physical-order email, then mark the order `CONFIRMED`. Goods are delivered only after settlement succeeds.
+4. **Verify, settle, fulfil.** The orders Lambda runs the order in strict order: verify the proof, claim it in a DynamoDB idempotency table (keyed on the chain's own single-use identity, such as the EIP-3009 payer and nonce) so a retried or concurrent duplicate cannot create a second order, reserve inventory atomically in DynamoDB, settle through the x402 facilitator, then fulfil by type: a digital file copied to the Amazon S3 library bucket (tracked download), a signed license token, or a physical-order email, then mark the order `CONFIRMED`. Goods are delivered only after settlement succeeds.
 
 #### Image generation seller
 

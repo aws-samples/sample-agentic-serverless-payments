@@ -33,6 +33,10 @@ import {
   listOrdersByUser,
   reserveInventory,
   restockInventory,
+  claimIdempotencyKey,
+  getIdempotencyRecord,
+  completeIdempotencyKey,
+  releaseIdempotencyKey,
   getSellerConfig,
   usdToMinor,
   presignDeliverable,
@@ -50,14 +54,10 @@ import {
   settleOrder,
   buyerAddressFromPayload,
   networkFromRequirements,
+  paymentIdempotencyKey,
   responseFromInstructions,
 } from "./x402.mjs";
 import { settlePayout } from "./payments.mjs";
-
-function header(event, name) {
-  const h = event.headers || {};
-  return h[name] || h[name.toLowerCase()] || h[name.toUpperCase()] || "";
-}
 
 export const handler = async (event) => {
   const method = event.requestContext?.http?.method || "GET";
@@ -170,19 +170,23 @@ async function placeOrder(event) {
   // v.kind === "verified"
   const { http, paymentPayload, paymentRequirements, declaredExtensions } = v;
 
-  // Idempotency: a retried proof (same nonce) must not double-create/charge.
-  const proofHeader = header(event, "payment-signature") || header(event, "x-payment");
-  const pp = paymentPayload?.payload || {};
-  const nonce = pp.authorization?.nonce || pp.nonce || String(proofHeader).slice(0, 64);
-  const existing = await getOrder(`nonce-${nonce}`).catch(() => null);
-  if (existing) return json({ order: existing, note: "idempotent replay" }, 200);
+  // Idempotency: a proof authorizes one transfer, so it may produce at most one
+  // order. Claim it before reserving stock or settling; a retry or concurrent
+  // duplicate is answered from the existing claim instead.
+  const idempotencyKey = paymentIdempotencyKey(paymentPayload, paymentRequirements);
+  if (!(await claimIdempotencyKey(idempotencyKey))) {
+    return await duplicatePaymentResponse(idempotencyKey, body.userId);
+  }
 
   const amountMinor = usdToMinor(Number(product.priceUsd) * qty);
 
   // Step 2 — reserve inventory (atomic, no overselling). Done before settle so
   // we never charge for stock we can't fulfill.
   const reserved = await reserveInventory(productId, qty);
-  if (!reserved) return json({ error: `Out of stock: ${product.name}` }, 409);
+  if (!reserved) {
+    await releaseIdempotencyKey(idempotencyKey);
+    return json({ error: `Out of stock: ${product.name}` }, 409);
+  }
 
   const network = networkFromRequirements(paymentRequirements);
   const buyerAddress = buyerAddressFromPayload(paymentPayload);
@@ -196,7 +200,6 @@ async function placeOrder(event) {
 
   const order = {
     orderId,
-    nonceKey: `nonce-${nonce}`,
     buyerUserId: body.userId || "",
     buyerEmail,
     buyerWalletAddress: buyerAddress,
@@ -218,8 +221,12 @@ async function placeOrder(event) {
     // Settlement failed after verify — release the reserved stock and report.
     await restockInventory(productId, qty);
     await updateOrderStatus(orderId, "VOIDED", { voidReason: "settlement_failed" });
+    await releaseIdempotencyKey(idempotencyKey);
     return json({ error: "Payment settlement failed", orderId }, 402);
   }
+  // Funds moved: the proof is spent. Record that before fulfillment so a
+  // retry from here on resolves to this order.
+  await completeIdempotencyKey(idempotencyKey, orderId);
 
   const tx = settle.body?.transaction || settle.body?.txHash || "";
 
@@ -240,6 +247,23 @@ async function placeOrder(event) {
   };
 
   return json({ order: confirmed, delivery: fulfillment.delivery }, 201);
+}
+
+// Answer a proof that is already claimed. Proof fields are public on-chain once
+// the payment settles, so resubmitting a proof must not reveal the order id
+// (the refund and download capability). The order summary goes back only when
+// the caller presents the buyer's userId, the same identity GET /orders?userId=
+// already trusts; anyone else learns only that the proof was used.
+async function duplicatePaymentResponse(idempotencyKey, userId) {
+  const record = await getIdempotencyRecord(idempotencyKey);
+  const order = record?.orderId ? await getOrder(record.orderId) : null;
+  if (!order || order.status === "PENDING") {
+    return json({ error: "This payment is already being processed. Retry shortly." }, 409, { "Retry-After": "5" });
+  }
+  if (userId && order.buyerUserId === userId) {
+    return json({ order: toAgentOrderSummary(order), note: "idempotent replay" }, 200);
+  }
+  return json({ error: "This payment has already been used for an order." }, 409);
 }
 
 // ── Fulfillment dispatch by product type ──

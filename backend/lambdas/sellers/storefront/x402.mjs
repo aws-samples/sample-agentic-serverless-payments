@@ -20,6 +20,7 @@
  * so we call processHTTPRequest (verify) and processSettlement (settle)
  * ourselves around the inventory + fulfillment logic.
  */
+import crypto from "node:crypto";
 import { x402ResourceServer, HTTPFacilitatorClient, x402HTTPResourceServer } from "@x402/core/server";
 import { registerExactEvmScheme } from "@x402/evm/exact/server";
 import { registerExactSvmScheme } from "@x402/svm/exact/server";
@@ -275,6 +276,32 @@ export function buyerAddressFromPayload(paymentPayload) {
     paymentPayload?.accepted?.from ||
     ""
   );
+}
+
+/**
+ * Idempotency key for a verified proof: the identity the chain itself uses to
+ * make the payment single-use, so two submissions share a key exactly when at
+ * most one of them can settle.
+ *   EIP-3009  the token contract records each (authorizer, nonce) once
+ *   Permit2   the Permit2 contract records each (owner, nonce) once
+ *   Solana    the signed transaction can land once
+ * Any other shape falls back to the signed payload itself. Returns a hex sha256.
+ */
+export function paymentIdempotencyKey(paymentPayload, paymentRequirements) {
+  const p = paymentPayload?.payload || {};
+  const network = String(paymentRequirements?.network || "");
+  const lower = (v) => String(v || "").toLowerCase();
+  let parts;
+  if (typeof p.transaction === "string" && p.transaction) {
+    parts = ["svm", network, p.transaction];
+  } else if (p.authorization?.nonce) {
+    parts = ["eip3009", network, lower(paymentRequirements?.asset), lower(p.authorization.from), lower(p.authorization.nonce)];
+  } else if (p.permit2Authorization?.nonce) {
+    parts = ["permit2", network, lower(p.permit2Authorization.from), String(p.permit2Authorization.nonce)];
+  } else {
+    parts = ["payload", network, JSON.stringify(p)];
+  }
+  return crypto.createHash("sha256").update(parts.join("|")).digest("hex");
 }
 
 /**

@@ -735,6 +735,16 @@ def send_response(event, context, status, data):
       indexName: "buyerUserId-index",
       partitionKey: { name: "buyerUserId", type: dynamodb.AttributeType.STRING },
     });
+    // Payment-proof idempotency keys: one x402 proof yields at most one order.
+    // Short-lived records, expired by DynamoDB TTL.
+    const idempotencyTable = new dynamodb.Table(this, "IdempotencyTable", {
+      tableName: "StorefrontIdempotency",
+      partitionKey: { name: "idempotencyKey", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      timeToLiveAttribute: "expiresAt",
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
 
     // ── Seller PaymentManager service role (assumed by AgentCore for the
     //    seller's payout manager — mirrors the buyer-side manager role) ──
@@ -794,6 +804,7 @@ def send_response(event, context, status, data):
     const storefrontEnv = {
       PRODUCTS_TABLE: productsTable.tableName,
       ORDERS_TABLE: ordersTable.tableName,
+      IDEMPOTENCY_TABLE: idempotencyTable.tableName,
       SELLER_CONFIG_TABLE: sellerConfigTable.tableName,
       USDC_CONTRACT: process.env.USDC_CONTRACT || "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
       SOLANA_USDC_MINT: process.env.SOLANA_USDC_MINT || "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
@@ -870,6 +881,7 @@ def send_response(event, context, status, data):
     });
     productsTable.grantReadWriteData(orderFn);
     ordersTable.grantReadWriteData(orderFn);
+    idempotencyTable.grantReadWriteData(orderFn);
     sellerConfigTable.grantReadData(orderFn);
 
     // Seller setup service — admin-triggered control-plane provisioning.

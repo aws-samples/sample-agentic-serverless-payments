@@ -25,10 +25,26 @@ describe("PaymentAgentStack", () => {
     template.resourceCountIs("AWS::ApiGatewayV2::Api", 3);
   });
 
-  test("provisions three DynamoDB tables with point-in-time recovery", () => {
-    template.resourceCountIs("AWS::DynamoDB::Table", 3);
+  test("provisions four DynamoDB tables with point-in-time recovery", () => {
+    template.resourceCountIs("AWS::DynamoDB::Table", 4);
     template.hasResourceProperties("AWS::DynamoDB::Table", {
       PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true },
+    });
+  });
+
+  test("storefront idempotency table expires records by TTL", () => {
+    template.hasResourceProperties("AWS::DynamoDB::Table", {
+      TableName: "StorefrontIdempotency",
+      KeySchema: [{ AttributeName: "idempotencyKey", KeyType: "HASH" }],
+      TimeToLiveSpecification: { AttributeName: "expiresAt", Enabled: true },
+      PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true },
+    });
+  });
+
+  test("order function can use the idempotency table", () => {
+    template.hasResourceProperties("AWS::Lambda::Function", {
+      FunctionName: "x402-storefront-orders",
+      Environment: { Variables: Match.objectLike({ IDEMPOTENCY_TABLE: Match.anyValue() }) },
     });
   });
 
